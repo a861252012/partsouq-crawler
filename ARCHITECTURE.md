@@ -1,0 +1,67 @@
+# Architecture
+
+## Data flow
+
+```text
+Seed / robots / sitemap
+          │
+          ▼
+SQLite persistent queue ── lease/recover/resume
+          │
+          ▼
+aiohttp GET ── stable UA / CookieJar / per-host delay / retry
+          │
+          ▼
+Store headers + status + raw body hash/zlib FIRST
+          │
+          ├── Cloudflare/access challenge ── blocked circuit breaker
+          │
+          └── HTML/XML
+                 │
+                 ├── sitemap/link discovery ── new queue rows
+                 └── classifier + generic/brand parser
+                               │
+                               ▼
+                    normalized records + provenance
+                               │
+                         ┌─────┴─────┐
+                         ▼           ▼
+                      export       reparse
+```
+
+## 元件
+
+- `crawl.engine`：run lifecycle、persistent queue worker、status transition、signal pause 與 challenge circuit breaker。
+- `crawl.fetcher`：單次 GET。正常 CookieJar、固定 User-Agent、timeout 與 per-host delay；不含 bypass 能力。
+- `crawl.robots` / `crawl.sitemap` / `crawl.discovery`：robots gate、nested/XML.GZ sitemap 與 HTML/data/meta/simple-location URL 發現。
+- `crawl.classifier`：URL route、query、DOM heading 與 table header 共同分類。
+- `db.repository`：單一 aiosqlite connection 與 write lock；raw response、queue、status、backup 與 DB health query。
+- `parsers.base`：generic metadata/table/breadcrumb parser。Toyota、Audi、Renault adapter 只處理欄位名稱差異。
+- `services.ingest`：冪等 normalized 寫入與 `record_sources`。
+- `services.reparse`：只讀 raw body，重新分類與解析，不發 HTTP request。
+- `services.export`：verified fitment 為預設，compatibility hint 必須明確 opt in。
+
+## 狀態與提交順序
+
+Queue 工作先取得有期限 lease。收到 response 後的提交順序固定為：
+
+1. `response_bodies` 去重保存。
+2. `http_responses` 保存 request/final URL、status、headers 與 SHA。
+3. challenge detector 判斷；命中就將 queue 設為 `challenged`、run 設為 `blocked`，停止發新 request。
+4. 正常 HTML/XML 才能 discovery 與 parse。
+5. normalized record 與 provenance 同一 transaction 寫入。
+6. queue 最後才轉成 `done`。
+
+程序在第 1 至 5 步崩潰時，lease 到期後會恢復 pending。已存在 raw response 仍保留作證據；正常重啟不會重抓已經 `done` 的 URL。
+
+429 會保存 response、尊重 `Retry-After`、將工作延後並 pause run。500/502/503/504 與 transport timeout 才會 exponential backoff + jitter。404/410 是 `gone` terminal。parser error 是 `parse_failed`，不重抓即可用 `reparse` 修復。
+
+## URL identity
+
+去重只做：scheme/hostname 小寫、default port 移除、fragment 移除、空 path 轉 `/`。path 與原始 query string保持不變，參數不排序、不移除，`ssd` 視為 opaque token。Redirect history 與 final URL 存在 response，不會覆寫 queue 的 requested URL。
+
+## 完整性邊界
+
+Crawler 的閉包是 seed、robots sitemap、nested sitemap 與已取得 HTML 公開連結所發現的 allowed URLs。它不枚舉 VIN/Frame、不登入，也不能證明網站中無連結的隱藏資料存在與否。
+
+`completed` 必須 queue 耗盡且沒有 failed/challenged/skipped_robots/parse_failed。任何 gap 都是 `completed_with_gaps`，外部阻斷則是 `blocked`。`crawl-status` 另外以 foreign keys 與 provenance 完整性計算 `strict_complete`。

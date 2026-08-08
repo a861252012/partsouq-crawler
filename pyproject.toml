@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "partsouq-crawler"
+version = "0.1.0"
+description = "Resumable, evidence-first crawler for public PartSouq Genuine Catalog pages"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+authors = [{ name = "Local workspace" }]
+dependencies = [
+    "aiohttp>=3.11,<4",
+    "aiosqlite>=0.20,<1",
+    "certifi>=2025.1.31",
+    "lxml>=5.3,<7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.15,<2",
+    "pytest>=8.3,<9",
+    "pytest-cov>=6,<8",
+    "ruff>=0.9,<1",
+]
+
+[project.scripts]
+partsouq-crawler = "partsouq_crawler.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/partsouq_crawler"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["partsouq_crawler"]
+
+[[tool.mypy.overrides]]
+module = ["lxml.*"]
+ignore_missing_imports = true
