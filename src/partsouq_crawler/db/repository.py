@@ -12,7 +12,7 @@ from pathlib import Path
 import aiosqlite
 
 from partsouq_crawler.crawl.discovery import normalize_url
-from partsouq_crawler.db.backup import backup_database
+from partsouq_crawler.db.backup import backup_database, publish_snapshot
 from partsouq_crawler.db.connection import connect
 from partsouq_crawler.db.migrations import migrate
 from partsouq_crawler.models.crawl import FetchResult, QueueItem
@@ -37,6 +37,10 @@ NORMALIZED_TABLES = (
     ("compatibility_hint", "compatibility_hints"),
     ("part_relation", "part_relations"),
 )
+
+
+def _paths_resolve_equal(left: Path, right: Path) -> bool:
+    return left.resolve() == right.resolve()
 
 
 def utc_now() -> str:
@@ -664,6 +668,14 @@ class Repository:
         async with self._write_lock:
             await self.connection.execute("PRAGMA wal_checkpoint(PASSIVE)")
             await backup_database(self.connection, destination)
+
+    async def publish_snapshot(self, destination: Path) -> dict[str, object]:
+        if await asyncio.to_thread(_paths_resolve_equal, self.path, destination):
+            raise ValueError("snapshot output must differ from the live database")
+
+        async with self._write_lock:
+            await self.connection.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            return await publish_snapshot(self.connection, destination)
 
     async def checkpoint(self) -> None:
         async with self._write_lock:

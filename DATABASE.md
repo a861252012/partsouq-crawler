@@ -93,4 +93,14 @@ WAL DB 執行中不可直接 `cp` 主檔，否則 snapshot 可能缺少 WAL 內�
 partsouq-crawler db-backup --sqlite output/partsouq-live.sqlite3 --output output/snapshot.sqlite3
 ```
 
+提供給後台時，改用具完整性檢查、manifest 與發布鎖的命令：
+
+```bash
+partsouq-crawler snapshot-publish \
+  --sqlite output/partsouq-live.sqlite3 \
+  --output ../partsouq-admin/writable/data/partsouq-current.sqlite3
+```
+
+後台必須以唯讀模式開啟快照，不可直接連線或回寫 live DB。
+
 Raw body 是 reparse 與稽核的負載核心，預設不自動刪除。用 `db-status` 檢查 raw/compressed bytes 與 compression ratio，再依明確 retention policy 另行歸檔；本專案不會靜默清理證據。

@@ -88,7 +88,10 @@ partsouq-crawler reparse --sqlite output/partsouq-live.sqlite3 --run-id 1
 partsouq-crawler export --sqlite output/partsouq-live.sqlite3 --output output/fitments.csv
 partsouq-crawler export --sqlite output/partsouq-live.sqlite3 --output output/all.jsonl --include-compatibility-hints
 partsouq-crawler db-backup --sqlite output/partsouq-live.sqlite3 --output output/backup.sqlite3
+partsouq-crawler snapshot-publish --sqlite output/partsouq-live.sqlite3 --output output/partsouq-current.sqlite3
 ```
+
+`snapshot-publish` 會在同一目錄先建立一致性備份，執行 `PRAGMA integrity_check`，寫入 SHA-256 manifest，再於發布鎖保護下原子替換快照。後台只應讀取這個已發布快照，不應直接讀 live DB。
 
 `reparse` 只讀取 DB 的 raw body，不會打 PartSouq。normalized 寫入採冪等 natural key。CSV 預設只含 verified fitment，並防護 Excel 公式注入；`/search/all` 的文字只會輸出為 compatibility hint。
 

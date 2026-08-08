@@ -3,6 +3,8 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import aiosqlite
+
 from partsouq_crawler.db.repository import Repository
 from partsouq_crawler.models.crawl import FetchResult
 
@@ -119,6 +121,51 @@ def test_sqlite_backup_api(tmp_path: Path) -> None:
         backup = await Repository.create(destination)
         assert await backup.get_run("run") is not None
         await backup.close()
+        await repository.close()
+
+    asyncio.run(scenario())
+
+
+def test_snapshot_publish_writes_valid_database_and_manifest(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        source = tmp_path / "source.sqlite3"
+        destination = tmp_path / "partsouq-current.sqlite3"
+        repository = await Repository.create(source)
+        await repository.create_or_get_run("published-run", [], {})
+
+        manifest = await repository.publish_snapshot(destination)
+
+        assert destination.exists()
+        assert destination.with_name(f"{destination.name}.manifest.json").exists()
+        assert manifest["format"] == "partsouq-snapshot-manifest-v1"
+        assert manifest["schema_version"] == 1
+        assert manifest["bytes"] == destination.stat().st_size
+
+        snapshot = await aiosqlite.connect(f"file:{destination}?mode=ro", uri=True)
+        integrity = await (await snapshot.execute("PRAGMA integrity_check")).fetchone()
+        run = await (
+            await snapshot.execute("SELECT run_key FROM crawl_runs ORDER BY id DESC LIMIT 1")
+        ).fetchone()
+        await snapshot.close()
+
+        assert integrity == ("ok",)
+        assert run == ("published-run",)
+        assert not destination.with_name(f"{destination.name}.publishing").exists()
+        await repository.close()
+
+    asyncio.run(scenario())
+
+
+def test_snapshot_publish_rejects_live_database_as_output(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        path = tmp_path / "live.sqlite3"
+        repository = await Repository.create(path)
+        try:
+            await repository.publish_snapshot(path)
+        except ValueError as error:
+            assert "must differ" in str(error)
+        else:
+            raise AssertionError("live database was accepted as snapshot output")
         await repository.close()
 
     asyncio.run(scenario())

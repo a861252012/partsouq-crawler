@@ -88,6 +88,13 @@ def build_parser() -> argparse.ArgumentParser:
     backup = subparsers.add_parser("db-backup")
     _database_argument(backup)
     backup.add_argument("--output", type=Path, required=True)
+
+    publish = subparsers.add_parser(
+        "snapshot-publish",
+        help="Validate and atomically publish a read-only database snapshot",
+    )
+    _database_argument(publish)
+    publish.add_argument("--output", type=Path, required=True)
     return parser
 
 
@@ -155,6 +162,10 @@ async def dispatch(args: argparse.Namespace) -> int:
         if args.command == "db-backup":
             await repository.backup(args.output)
             _print_json({"backup": str(args.output)})
+            return 0
+        if args.command == "snapshot-publish":
+            manifest = await repository.publish_snapshot(args.output)
+            _print_json({"snapshot": str(args.output), "manifest": manifest})
             return 0
         raise ValueError(f"unsupported command: {args.command}")
     finally:

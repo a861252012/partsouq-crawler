@@ -147,3 +147,8 @@ def test_cli_database_commands_and_export_service(tmp_path: Path) -> None:
     backup = tmp_path / "backup.sqlite3"
     assert asyncio.run(command(["db-backup", *base, "--output", str(backup)])) == 0
     assert backup.exists()
+
+    snapshot = tmp_path / "partsouq-current.sqlite3"
+    assert asyncio.run(command(["snapshot-publish", *base, "--output", str(snapshot)])) == 0
+    assert snapshot.exists()
+    assert snapshot.with_name(f"{snapshot.name}.manifest.json").exists()
