@@ -8,8 +8,72 @@ DEFAULT_SEED = "https://partsouq.com/en/catalog/genuine"
 
 
 @dataclass(frozen=True, slots=True)
+class PartSouqMySQLConfig:
+    host: str = "127.0.0.1"
+    port: int = 3308
+    database: str = "partsouq"
+    user: str = "partsouq"
+    password: str = "partsouq-local"
+    pool_min_size: int = 1
+    pool_max_size: int = 10
+    connect_timeout_seconds: int = 10
+
+    @classmethod
+    def from_env(cls, **overrides: object) -> PartSouqMySQLConfig:
+        values: dict[str, object] = {
+            "host": os.getenv("PARTSOUQ_MYSQL_HOST", "127.0.0.1"),
+            "port": int(os.getenv("PARTSOUQ_MYSQL_PORT", "3308")),
+            "database": os.getenv("PARTSOUQ_MYSQL_DATABASE", "partsouq"),
+            "user": os.getenv("PARTSOUQ_MYSQL_USER", "partsouq"),
+            "password": os.getenv("PARTSOUQ_MYSQL_PASSWORD", "partsouq-local"),
+            "pool_min_size": int(os.getenv("PARTSOUQ_MYSQL_POOL_MIN_SIZE", "1")),
+            "pool_max_size": int(os.getenv("PARTSOUQ_MYSQL_POOL_MAX_SIZE", "10")),
+            "connect_timeout_seconds": int(
+                os.getenv("PARTSOUQ_MYSQL_CONNECT_TIMEOUT_SECONDS", "10")
+            ),
+        }
+        values.update({key: value for key, value in overrides.items() if value is not None})
+        config = cls(
+            host=str(values["host"]),
+            port=int(str(values["port"])),
+            database=str(values["database"]),
+            user=str(values["user"]),
+            password=str(values["password"]),
+            pool_min_size=int(str(values["pool_min_size"])),
+            pool_max_size=int(str(values["pool_max_size"])),
+            connect_timeout_seconds=int(str(values["connect_timeout_seconds"])),
+        )
+        config.validate()
+        return config
+
+    def validate(self) -> None:
+        if not self.host or not self.database or not self.user:
+            raise ValueError("MySQL host, database, and user are required")
+        if not 1 <= self.port <= 65535:
+            raise ValueError("MySQL port must be between 1 and 65535")
+        if self.pool_min_size < 1 or self.pool_max_size < self.pool_min_size:
+            raise ValueError("MySQL pool sizes are invalid")
+        if self.connect_timeout_seconds < 1:
+            raise ValueError("MySQL connect timeout must be positive")
+
+    def public_dsn(self) -> str:
+        return f"mysql://{self.user}@{self.host}:{self.port}/{self.database}"
+
+    def public_dict(self) -> dict[str, object]:
+        return {
+            "host": self.host,
+            "port": self.port,
+            "database": self.database,
+            "user": self.user,
+            "pool_min_size": self.pool_min_size,
+            "pool_max_size": self.pool_max_size,
+            "connect_timeout_seconds": self.connect_timeout_seconds,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class CrawlerConfig:
-    database: Path = Path("output/partsouq-live.sqlite3")
+    database: Path = Path("mysql")
     concurrency: int = 1
     delay_seconds: float = 5.0
     request_timeout_seconds: float = 30.0
@@ -27,7 +91,7 @@ class CrawlerConfig:
     @classmethod
     def from_env(cls, **overrides: object) -> CrawlerConfig:
         values: dict[str, object] = {
-            "database": Path(os.getenv("PARTSOUQ_DATABASE", "output/partsouq-live.sqlite3")),
+            "database": Path("mysql"),
             "concurrency": int(os.getenv("PARTSOUQ_CONCURRENCY", "1")),
             "delay_seconds": float(os.getenv("PARTSOUQ_DELAY_SECONDS", "5")),
             "request_timeout_seconds": float(os.getenv("PARTSOUQ_REQUEST_TIMEOUT_SECONDS", "30")),
@@ -80,7 +144,7 @@ class CrawlerConfig:
 
     def public_dict(self) -> dict[str, object]:
         return {
-            "database": str(self.database),
+            "database_backend": "mysql",
             "concurrency": self.concurrency,
             "delay_seconds": self.delay_seconds,
             "request_timeout_seconds": self.request_timeout_seconds,

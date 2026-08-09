@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from collections.abc import Mapping, Sequence
+from typing import Any, cast
 
 import aiosqlite
 
@@ -9,7 +10,9 @@ from partsouq_crawler.db.repository import Repository, utc_now
 from partsouq_crawler.models.records import ParsedPage, PartRecord, VehicleRecord
 from partsouq_crawler.parsers.base import PARSER_VERSION
 from partsouq_crawler.parsers.common import is_assembly_name, normalize_part_number
-from partsouq_crawler.services.provenance import add_source
+from partsouq_crawler.services.provenance import add_source, add_sources
+
+MYSQL_BATCH_SIZE = 500
 
 
 class IngestService:
@@ -28,12 +31,42 @@ class IngestService:
         verified_fitments: bool = True,
         fitment_derivation: str = "genuine_catalog_diagram_part_occurrence",
     ) -> int:
+        if getattr(self.repository, "backend_name", "sqlite") == "mysql":
+            return await self._ingest_mysql(
+                run_id=run_id,
+                response_id=response_id,
+                source_url=source_url,
+                parsed=parsed,
+                verified_fitments=verified_fitments,
+                fitment_derivation=fitment_derivation,
+            )
+
+        return await self._ingest_sqlite(
+            run_id=run_id,
+            response_id=response_id,
+            source_url=source_url,
+            parsed=parsed,
+            verified_fitments=verified_fitments,
+            fitment_derivation=fitment_derivation,
+        )
+
+    async def _ingest_sqlite(
+        self,
+        *,
+        run_id: int,
+        response_id: int,
+        source_url: str,
+        parsed: ParsedPage,
+        verified_fitments: bool,
+        fitment_derivation: str,
+    ) -> int:
         inserted = 0
         async with self.repository.transaction() as connection:
+            sqlite_connection = cast(aiosqlite.Connection, connection)
             vehicle_id: int | None = None
             if parsed.vehicle is not None:
                 vehicle_id, created = await self._vehicle(
-                    connection, parsed.vehicle, source_url, response_id
+                    sqlite_connection, parsed.vehicle, source_url, response_id
                 )
                 inserted += created
 
@@ -44,7 +77,7 @@ class IngestService:
                     for depth, name in enumerate(taxonomy.path):
                         path = taxonomy.path[: depth + 1]
                         node_id, created = await self._taxonomy(
-                            connection,
+                            sqlite_connection,
                             vehicle_id=vehicle_id,
                             parent_id=parent_id,
                             depth=depth,
@@ -65,7 +98,7 @@ class IngestService:
                     if taxonomy_id is None and len(taxonomy_ids) == 1:
                         taxonomy_id = next(iter(taxonomy_ids.values()))
                     diagram_id, created = await self._diagram(
-                        connection,
+                        sqlite_connection,
                         vehicle_id=vehicle_id,
                         taxonomy_id=taxonomy_id,
                         code=diagram.code_raw,
@@ -84,7 +117,7 @@ class IngestService:
 
             for part in parsed.parts:
                 part_id, created = await self._part_number(
-                    connection,
+                    sqlite_connection,
                     part=part,
                     fallback_brand=parsed.vehicle.catalog_brand if parsed.vehicle else None,
                     source_url=source_url,
@@ -95,7 +128,7 @@ class IngestService:
                 if vehicle_id is None or selected_diagram_id is None:
                     continue
                 occurrence_id, created = await self._occurrence(
-                    connection,
+                    sqlite_connection,
                     part_id=part_id,
                     diagram_id=selected_diagram_id,
                     vehicle_id=vehicle_id,
@@ -105,7 +138,7 @@ class IngestService:
                 )
                 inserted += created
                 _, created = await self._fitment(
-                    connection,
+                    sqlite_connection,
                     occurrence_id=occurrence_id,
                     part_id=part_id,
                     vehicle_id=vehicle_id,
@@ -121,7 +154,7 @@ class IngestService:
             for hint in parsed.compatibility_hints:
                 hint_part = PartRecord(number_raw=hint.part_number_raw)
                 part_id, created = await self._part_number(
-                    connection,
+                    sqlite_connection,
                     part=hint_part,
                     fallback_brand=hint.brand_text,
                     source_url=source_url,
@@ -129,7 +162,7 @@ class IngestService:
                 )
                 inserted += created
                 row_id, created = await self._get_or_create(
-                    connection,
+                    sqlite_connection,
                     select_sql="""
                         SELECT id FROM compatibility_hints
                         WHERE part_number_id = ? AND compatibility_text = ? AND source_url = ?
@@ -151,14 +184,18 @@ class IngestService:
                     ),
                 )
                 await self._source(
-                    connection, "compatibility_hint", row_id, response_id, source_url
+                    sqlite_connection,
+                    "compatibility_hint",
+                    row_id,
+                    response_id,
+                    source_url,
                 )
                 inserted += created
 
             for relation in parsed.part_relations:
                 relation_part = PartRecord(number_raw=relation.from_part_number_raw)
                 part_id, created = await self._part_number(
-                    connection,
+                    sqlite_connection,
                     part=relation_part,
                     fallback_brand=None,
                     source_url=source_url,
@@ -166,7 +203,7 @@ class IngestService:
                 )
                 inserted += created
                 row_id, created = await self._get_or_create(
-                    connection,
+                    sqlite_connection,
                     select_sql="""
                         SELECT id FROM part_relations
                         WHERE from_part_number_id = ? AND to_part_number_raw = ?
@@ -196,9 +233,537 @@ class IngestService:
                         utc_now(),
                     ),
                 )
-                await self._source(connection, "part_relation", row_id, response_id, source_url)
+                await self._source(
+                    sqlite_connection, "part_relation", row_id, response_id, source_url
+                )
                 inserted += created
 
+            await sqlite_connection.execute(
+                """
+                UPDATE crawl_runs
+                SET records_extracted = records_extracted + ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (inserted, utc_now(), run_id),
+            )
+        return inserted
+
+    async def _ingest_mysql(
+        self,
+        *,
+        run_id: int,
+        response_id: int,
+        source_url: str,
+        parsed: ParsedPage,
+        verified_fitments: bool,
+        fitment_derivation: str,
+    ) -> int:
+        inserted = 0
+        now = utc_now()
+        provenance: dict[tuple[str, int, int, str, str, str], None] = {}
+
+        async with self.repository.transaction() as connection:
+            vehicle_id: int | None = None
+            if parsed.vehicle is not None:
+                vehicle = parsed.vehicle
+                vehicle_key = (
+                    vehicle.catalog_brand,
+                    vehicle.vehicle_external_id,
+                    vehicle.model_raw,
+                    vehicle.prod_period_raw,
+                    source_url,
+                )
+                inserted += await self._mysql_insert_many(
+                    connection,
+                    """
+                    INSERT IGNORE INTO vehicle_configurations(
+                        catalog_brand, brand_raw, brand_normalized, name_raw, model_raw,
+                        description_raw, options_raw, prod_period_raw, production_from,
+                        production_to, production_precision, catalog_code,
+                        vehicle_external_id, metadata_json, source_url, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            vehicle.catalog_brand,
+                            vehicle.brand_raw,
+                            vehicle.brand_normalized,
+                            vehicle.name_raw,
+                            vehicle.model_raw,
+                            vehicle.description_raw,
+                            vehicle.options_raw,
+                            vehicle.prod_period_raw,
+                            vehicle.production_from,
+                            vehicle.production_to,
+                            vehicle.production_precision,
+                            vehicle.catalog_code,
+                            vehicle.vehicle_external_id,
+                            json.dumps(vehicle.metadata, sort_keys=True),
+                            source_url,
+                            now,
+                            now,
+                        )
+                    ],
+                )
+                vehicle_ids = await self._mysql_select_ids(
+                    connection,
+                    table="vehicle_configurations",
+                    columns=(
+                        "catalog_brand",
+                        "vehicle_external_id",
+                        "model_raw",
+                        "prod_period_raw",
+                        "source_url",
+                    ),
+                    keys=[vehicle_key],
+                )
+                vehicle_id = vehicle_ids.get(vehicle_key)
+                if vehicle_id is None:
+                    raise RuntimeError("vehicle insert could not be resolved")
+                provenance[
+                    (
+                        "vehicle_configuration",
+                        vehicle_id,
+                        response_id,
+                        self.parser_name,
+                        PARSER_VERSION,
+                        source_url,
+                    )
+                ] = None
+
+            taxonomy_ids: dict[tuple[str, ...], int] = {}
+            if vehicle_id is not None:
+                taxonomy_values: dict[tuple[str, ...], tuple[int, str | None, str, str]] = {}
+                for taxonomy in parsed.taxonomies:
+                    for depth, name in enumerate(taxonomy.path):
+                        path = taxonomy.path[: depth + 1]
+                        taxonomy_values.setdefault(
+                            path,
+                            (
+                                depth,
+                                taxonomy.codes[depth] if depth < len(taxonomy.codes) else None,
+                                name,
+                                " > ".join(path),
+                            ),
+                        )
+
+                max_depth = max((value[0] for value in taxonomy_values.values()), default=-1)
+                for depth in range(max_depth + 1):
+                    paths = [path for path, value in taxonomy_values.items() if value[0] == depth]
+                    rows: list[tuple[object, ...]] = []
+                    keys: list[tuple[object, ...]] = []
+                    for path in paths:
+                        _, code, name, path_raw = taxonomy_values[path]
+                        parent_id = taxonomy_ids.get(path[:-1]) if len(path) > 1 else None
+                        rows.append(
+                            (vehicle_id, parent_id, depth, code, name, path_raw, source_url)
+                        )
+                        keys.append((vehicle_id, path_raw))
+                    inserted += await self._mysql_insert_many(
+                        connection,
+                        """
+                        INSERT IGNORE INTO taxonomy_nodes(
+                            vehicle_configuration_id, parent_id, depth, code_raw,
+                            name_raw, path_raw, source_url
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        rows,
+                    )
+                    selected = await self._mysql_select_ids(
+                        connection,
+                        table="taxonomy_nodes",
+                        columns=("vehicle_configuration_id", "path_raw"),
+                        keys=keys,
+                    )
+                    for path, key in zip(paths, keys, strict=True):
+                        node_id = selected.get(key)
+                        if node_id is None:
+                            raise RuntimeError("taxonomy insert could not be resolved")
+                        taxonomy_ids[path] = node_id
+                        provenance[
+                            (
+                                "taxonomy_node",
+                                node_id,
+                                response_id,
+                                self.parser_name,
+                                PARSER_VERSION,
+                                source_url,
+                            )
+                        ] = None
+
+            diagram_ids: dict[str, int] = {}
+            diagram_key_by_index: dict[int, tuple[object, ...]] = {}
+            if vehicle_id is not None:
+                diagram_values: dict[tuple[object, ...], tuple[object, ...]] = {}
+                for index, diagram in enumerate(parsed.diagrams):
+                    taxonomy_id = taxonomy_ids.get(diagram.category_path)
+                    if taxonomy_id is None and len(taxonomy_ids) == 1:
+                        taxonomy_id = next(iter(taxonomy_ids.values()))
+                    key = (
+                        vehicle_id,
+                        diagram.code_raw,
+                        diagram.name_raw,
+                        diagram.range_raw,
+                        source_url,
+                    )
+                    diagram_key_by_index[index] = key
+                    diagram_values.setdefault(
+                        key,
+                        (
+                            vehicle_id,
+                            taxonomy_id,
+                            diagram.code_raw,
+                            diagram.name_raw,
+                            diagram.range_raw,
+                            diagram.diagram_from,
+                            diagram.diagram_to,
+                            json.dumps(diagram.metadata, sort_keys=True),
+                            source_url,
+                        ),
+                    )
+                inserted += await self._mysql_insert_many(
+                    connection,
+                    """
+                    INSERT IGNORE INTO diagrams(
+                        vehicle_configuration_id, taxonomy_node_id, diagram_code_raw,
+                        diagram_name_raw, diagram_range_raw, diagram_from, diagram_to,
+                        metadata_json, source_url
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    list(diagram_values.values()),
+                )
+                selected = await self._mysql_select_ids(
+                    connection,
+                    table="diagrams",
+                    columns=(
+                        "vehicle_configuration_id",
+                        "diagram_code_raw",
+                        "diagram_name_raw",
+                        "diagram_range_raw",
+                        "source_url",
+                    ),
+                    keys=list(diagram_values),
+                )
+                for index, diagram in enumerate(parsed.diagrams):
+                    diagram_id = selected.get(diagram_key_by_index[index])
+                    if diagram_id is None:
+                        raise RuntimeError("diagram insert could not be resolved")
+                    diagram_ids[diagram.code_raw or f"id:{diagram_id}"] = diagram_id
+                    if diagram.name_raw:
+                        diagram_ids[f"name:{diagram.name_raw}"] = diagram_id
+                    provenance[
+                        (
+                            "diagram",
+                            diagram_id,
+                            response_id,
+                            self.parser_name,
+                            PARSER_VERSION,
+                            source_url,
+                        )
+                    ] = None
+
+            part_inputs: list[tuple[PartRecord, str | None]] = [
+                (part, parsed.vehicle.catalog_brand if parsed.vehicle else None)
+                for part in parsed.parts
+            ]
+            part_inputs.extend(
+                (PartRecord(number_raw=hint.part_number_raw), hint.brand_text)
+                for hint in parsed.compatibility_hints
+            )
+            part_inputs.extend(
+                (PartRecord(number_raw=relation.from_part_number_raw), None)
+                for relation in parsed.part_relations
+            )
+            part_values: dict[tuple[object, ...], tuple[object, ...]] = {}
+            for part, fallback_brand in part_inputs:
+                brand = part.part_brand_raw or fallback_brand
+                key = (brand, part.number_raw)
+                assembly, reason = is_assembly_name(part.name_en_raw)
+                part_values.setdefault(
+                    key,
+                    (
+                        brand,
+                        part.number_raw,
+                        normalize_part_number(part.number_raw),
+                        part.name_en_raw,
+                        assembly,
+                        reason,
+                        source_url,
+                        now,
+                        now,
+                    ),
+                )
+
+            part_ids = await self._mysql_select_ids(
+                connection,
+                table="part_numbers",
+                columns=("part_brand_raw", "number_raw"),
+                keys=list(part_values),
+            )
+            missing_part_values = [
+                values for key, values in part_values.items() if key not in part_ids
+            ]
+            inserted += await self._mysql_insert_many(
+                connection,
+                """
+                INSERT IGNORE INTO part_numbers(
+                    part_brand_raw, number_raw, number_normalized, name_en_raw,
+                    is_assembly_inferred, assembly_inference_reason, source_url,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                missing_part_values,
+            )
+            part_ids = await self._mysql_select_ids(
+                connection,
+                table="part_numbers",
+                columns=("part_brand_raw", "number_raw"),
+                keys=list(part_values),
+            )
+            for key in part_values:
+                part_id = part_ids.get(key)
+                if part_id is None:
+                    raise RuntimeError("part number insert could not be resolved")
+                provenance[
+                    (
+                        "part_number",
+                        part_id,
+                        response_id,
+                        self.parser_name,
+                        PARSER_VERSION,
+                        source_url,
+                    )
+                ] = None
+
+            occurrence_values: dict[tuple[object, ...], tuple[object, ...]] = {}
+            occurrence_key_by_index: dict[int, tuple[object, ...]] = {}
+            if vehicle_id is not None:
+                fallback_brand = parsed.vehicle.catalog_brand if parsed.vehicle else None
+                for index, part in enumerate(parsed.parts):
+                    part_id = part_ids[(part.part_brand_raw or fallback_brand, part.number_raw)]
+                    diagram_id = self._choose_diagram(part, diagram_ids)
+                    if diagram_id is None:
+                        continue
+                    key = (
+                        part_id,
+                        diagram_id,
+                        part.callout_raw,
+                        part.quantity_raw,
+                        part.part_range_raw,
+                        part.condition_raw,
+                        part.note_raw,
+                        source_url,
+                    )
+                    occurrence_key_by_index[index] = key
+                    occurrence_values.setdefault(
+                        key,
+                        (
+                            part_id,
+                            diagram_id,
+                            vehicle_id,
+                            part.callout_raw,
+                            part.quantity_raw,
+                            part.part_range_raw,
+                            part.part_from,
+                            part.part_to,
+                            part.condition_raw,
+                            part.note_raw,
+                            json.dumps(part.row_metadata, sort_keys=True),
+                            source_url,
+                        ),
+                    )
+            inserted += await self._mysql_insert_many(
+                connection,
+                """
+                INSERT IGNORE INTO part_occurrences(
+                    part_number_id, diagram_id, vehicle_configuration_id,
+                    callout_raw, quantity_raw, part_range_raw, part_from, part_to,
+                    part_condition_raw, note_raw, row_metadata_json, source_url
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                list(occurrence_values.values()),
+            )
+            occurrence_ids = await self._mysql_select_ids(
+                connection,
+                table="part_occurrences",
+                columns=(
+                    "part_number_id",
+                    "diagram_id",
+                    "callout_raw",
+                    "quantity_raw",
+                    "part_range_raw",
+                    "part_condition_raw",
+                    "note_raw",
+                    "source_url",
+                ),
+                keys=list(occurrence_values),
+            )
+            for occurrence_id in occurrence_ids.values():
+                provenance[
+                    (
+                        "part_occurrence",
+                        occurrence_id,
+                        response_id,
+                        self.parser_name,
+                        PARSER_VERSION,
+                        source_url,
+                    )
+                ] = None
+
+            fitment_values: dict[tuple[object, ...], tuple[object, ...]] = {}
+            for index, occurrence_key in occurrence_key_by_index.items():
+                resolved_occurrence_id = occurrence_ids.get(occurrence_key)
+                if resolved_occurrence_id is None or vehicle_id is None:
+                    raise RuntimeError("part occurrence insert could not be resolved")
+                part = parsed.parts[index]
+                fitment_part_id = occurrence_key[0]
+                fitment_diagram_id = occurrence_key[1]
+                if not isinstance(fitment_part_id, int) or not isinstance(fitment_diagram_id, int):
+                    raise RuntimeError("part occurrence has invalid foreign keys")
+                fitment_values.setdefault(
+                    (resolved_occurrence_id, fitment_derivation),
+                    (
+                        resolved_occurrence_id,
+                        fitment_part_id,
+                        vehicle_id,
+                        fitment_diagram_id,
+                        verified_fitments,
+                        fitment_derivation,
+                        1.0 if verified_fitments else 0.7,
+                        part.part_from,
+                        part.part_to,
+                        source_url,
+                    ),
+                )
+            inserted += await self._mysql_insert_many(
+                connection,
+                """
+                INSERT IGNORE INTO fitments(
+                    part_occurrence_id, part_number_id, vehicle_configuration_id,
+                    diagram_id, is_verified, derivation, confidence,
+                    effective_from, effective_to, source_url
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                list(fitment_values.values()),
+            )
+            fitment_ids = await self._mysql_select_ids(
+                connection,
+                table="fitments",
+                columns=("part_occurrence_id", "derivation"),
+                keys=list(fitment_values),
+            )
+            for fitment_id in fitment_ids.values():
+                provenance[
+                    (
+                        "fitment",
+                        fitment_id,
+                        response_id,
+                        self.parser_name,
+                        PARSER_VERSION,
+                        source_url,
+                    )
+                ] = None
+
+            hint_values: dict[tuple[object, ...], tuple[object, ...]] = {}
+            for hint in parsed.compatibility_hints:
+                part_id = part_ids[(hint.brand_text, hint.part_number_raw)]
+                key = (part_id, hint.compatibility_text, source_url)
+                hint_values.setdefault(
+                    key,
+                    (
+                        part_id,
+                        hint.brand_text,
+                        hint.model_text,
+                        hint.compatibility_text,
+                        source_url,
+                        now,
+                    ),
+                )
+            inserted += await self._mysql_insert_many(
+                connection,
+                """
+                INSERT IGNORE INTO compatibility_hints(
+                    part_number_id, brand_text, model_text, compatibility_text,
+                    source_url, observed_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                list(hint_values.values()),
+            )
+            hint_ids = await self._mysql_select_ids(
+                connection,
+                table="compatibility_hints",
+                columns=("part_number_id", "compatibility_text", "source_url"),
+                keys=list(hint_values),
+            )
+            for hint_id in hint_ids.values():
+                provenance[
+                    (
+                        "compatibility_hint",
+                        hint_id,
+                        response_id,
+                        self.parser_name,
+                        PARSER_VERSION,
+                        source_url,
+                    )
+                ] = None
+
+            relation_values: dict[tuple[object, ...], tuple[object, ...]] = {}
+            for relation in parsed.part_relations:
+                part_id = part_ids[(None, relation.from_part_number_raw)]
+                key = (
+                    part_id,
+                    relation.to_part_number_raw,
+                    relation.relation_type,
+                    source_url,
+                )
+                relation_values.setdefault(
+                    key,
+                    (
+                        part_id,
+                        relation.to_part_number_raw,
+                        normalize_part_number(relation.to_part_number_raw),
+                        relation.relation_type,
+                        relation.relation_text,
+                        relation.confidence,
+                        source_url,
+                        now,
+                    ),
+                )
+            inserted += await self._mysql_insert_many(
+                connection,
+                """
+                INSERT IGNORE INTO part_relations(
+                    from_part_number_id, to_part_number_raw,
+                    to_part_number_normalized, relation_type, relation_text,
+                    confidence, source_url, observed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                list(relation_values.values()),
+            )
+            relation_ids = await self._mysql_select_ids(
+                connection,
+                table="part_relations",
+                columns=(
+                    "from_part_number_id",
+                    "to_part_number_raw",
+                    "relation_type",
+                    "source_url",
+                ),
+                keys=list(relation_values),
+            )
+            for relation_id in relation_ids.values():
+                provenance[
+                    (
+                        "part_relation",
+                        relation_id,
+                        response_id,
+                        self.parser_name,
+                        PARSER_VERSION,
+                        source_url,
+                    )
+                ] = None
+
+            await add_sources(connection, sources=list(provenance))
             await connection.execute(
                 """
                 UPDATE crawl_runs
@@ -208,6 +773,51 @@ class IngestService:
                 (inserted, utc_now(), run_id),
             )
         return inserted
+
+    @staticmethod
+    async def _mysql_insert_many(
+        connection: Any,
+        sql: str,
+        rows: Sequence[tuple[object, ...]],
+    ) -> int:
+        if not rows:
+            return 0
+        inserted = 0
+        for start in range(0, len(rows), MYSQL_BATCH_SIZE):
+            cursor = await connection.executemany(sql, rows[start : start + MYSQL_BATCH_SIZE])
+            rowcount = getattr(cursor, "rowcount", 0)
+            if isinstance(rowcount, int) and rowcount > 0:
+                inserted += rowcount
+        return inserted
+
+    @staticmethod
+    async def _mysql_select_ids(
+        connection: Any,
+        *,
+        table: str,
+        columns: tuple[str, ...],
+        keys: Sequence[tuple[object, ...]],
+    ) -> dict[tuple[object, ...], int]:
+        unique_keys = list(dict.fromkeys(keys))
+        selected: dict[tuple[object, ...], int] = {}
+        for start in range(0, len(unique_keys), MYSQL_BATCH_SIZE):
+            batch = unique_keys[start : start + MYSQL_BATCH_SIZE]
+            predicates = " OR ".join(
+                "(" + " AND ".join(f"{column} <=> ?" for column in columns) + ")" for _ in batch
+            )
+            sql = f"SELECT id, {', '.join(columns)} FROM {table} WHERE {predicates} ORDER BY id"
+            parameters = tuple(value for key in batch for value in key)
+            cursor = await connection.execute(sql, parameters)
+            rows = await cursor.fetchall()
+            for row in rows:
+                if isinstance(row, Mapping):
+                    row_id = int(row["id"])
+                    key = tuple(row[column] for column in columns)
+                else:
+                    row_id = int(row[0])
+                    key = tuple(row[index + 1] for index in range(len(columns)))
+                selected.setdefault(key, row_id)
+        return selected
 
     async def _vehicle(
         self,

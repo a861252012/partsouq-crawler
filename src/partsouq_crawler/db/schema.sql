@@ -266,5 +266,46 @@ CREATE TABLE IF NOT EXISTS robots_snapshots (
     UNIQUE(run_id, response_id, user_agent)
 );
 
+CREATE TABLE IF NOT EXISTS archive_import_manifests (
+    id INTEGER PRIMARY KEY,
+    run_id INTEGER NOT NULL REFERENCES crawl_runs(id) ON DELETE CASCADE,
+    archive_source TEXT NOT NULL,
+    manifest_key TEXT NOT NULL,
+    metadata_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(run_id, archive_source, manifest_key)
+);
+
+CREATE TABLE IF NOT EXISTS archive_import_items (
+    id INTEGER PRIMARY KEY,
+    manifest_id INTEGER NOT NULL REFERENCES archive_import_manifests(id) ON DELETE CASCADE,
+    capture_key TEXT NOT NULL,
+    source_url TEXT NOT NULL,
+    collection_name TEXT NOT NULL DEFAULT '',
+    warc_filename TEXT NOT NULL DEFAULT '',
+    warc_offset INTEGER NOT NULL DEFAULT 0,
+    warc_length INTEGER NOT NULL DEFAULT 0,
+    index_timestamp TEXT NOT NULL DEFAULT '',
+    index_digest TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    worker_id TEXT,
+    fencing_token INTEGER NOT NULL DEFAULT 0,
+    lease_expires_at TEXT,
+    response_id INTEGER REFERENCES http_responses(id) ON DELETE SET NULL,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    finished_at TEXT,
+    UNIQUE(manifest_id, capture_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_archive_import_items_claim
+ON archive_import_items(manifest_id, status, id);
+
+CREATE INDEX IF NOT EXISTS idx_archive_import_items_lease
+ON archive_import_items(manifest_id, status, lease_expires_at);
+
 INSERT OR IGNORE INTO schema_migrations(version, applied_at)
 VALUES (1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));

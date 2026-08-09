@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}{{ spec.title }}｜PartSouq 本機資料後台{% endblock %}
+{% block content %}
+  <div class="page-title">
+    <div><h1>{{ spec.title }}</h1><p>採 keyset 分頁；每頁固定三次查詢。</p></div>
+    <a class="button" href="{{ url_for('admin.entity_create', entity_type=spec.key) }}">新增人工資料</a>
+  </div>
+  <form class="filters" method="get">
+    <input type="search" name="q" value="{{ page.query }}" placeholder="搜尋來源欄位或覆寫內容">
+    <label><input type="checkbox" name="include_retired" value="1" {% if page.include_retired %}checked{% endif %}> 顯示已停用</label>
+    <button type="submit">查詢</button>
+  </form>
+  <div class="record-list">
+    {% for record in page.records %}
+      <a class="record-row {% if record.status == 'retired' %}retired{% endif %}"
+         href="{{ url_for('admin.entity_detail', entity_type=spec.key, identity_key=record.identity_key) }}">
+        <div><code>{{ record.identity_key }}</code> <span class="badge">{{ '來源' if record.source_record_id else '人工' }}</span></div>
+        <pre>{{ record.payload | tojson(indent=2) }}</pre>
+        <small>版本 {{ record.revision }} · {{ record.status }}</small>
+      </a>
+    {% else %}
+      <p class="empty">沒有符合條件的資料。</p>
+    {% endfor %}
+  </div>
+  {% if page.next_cursor %}
+    <a class="button secondary" href="{{ url_for('admin.entity_list', entity_type=spec.key, q=page.query, include_retired=1 if page.include_retired else 0, cursor=page.next_cursor) }}">下一頁</a>
+  {% endif %}
+{% endblock %}

@@ -11,6 +11,8 @@ class QueueItem:
     depth: int
     attempts: int
     page_type_hint: str | None
+    worker_id: str | None = None
+    fencing_token: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

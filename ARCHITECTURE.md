@@ -1,126 +1,172 @@
 # Architecture
 
-PartSouq 與 NHTSA 共用 CLI package，但下載、資料庫與完成條件互相獨立。
+PartSouq crawler、archive importer、CRUD 後台與 NHTSA sync 共用一個 Python package，但各自有明確的資料來源、完成條件與 failure boundary。
 
-## Data flow
+## PartSouq live data flow
 
 ```text
-Seed / robots / sitemap
-          │
-          ▼
-SQLite persistent queue ── lease/recover/resume
-          │
-          ▼
-aiohttp GET ── stable UA / CookieJar / per-host delay / retry
-          │
-          ▼
-Store headers + status + raw body hash/zlib FIRST
-          │
-          ├── Cloudflare/access challenge ── blocked circuit breaker
-          │
-          └── HTML/XML
+seed / robots / sitemap / HTML links
                  │
-                 ├── sitemap/link discovery ── new queue rows
-                 └── classifier + generic/brand parser
-                               │
-                               ▼
-                    normalized records + provenance
-                               │
-                         ┌─────┴─────┐
-                         ▼           ▼
-                      export       reparse
+                 ▼
+       MySQL persistent queue
+       lease + fencing + resume
+                 │
+                 ▼
+       HTTP or Brave/Playwright
+       stable UA / low concurrency
+                 │
+                 ▼
+ raw response + SHA-256 + headers FIRST
+                 │
+        ┌────────┴─────────┐
+        ▼                  ▼
+ Cloudflare challenge   normal HTML/XML
+ blocked circuit        classify/discover/parse
+ breaker                   │
+                           ▼
+             batch normalized records
+                     + provenance
 ```
 
-## 元件
+### Live 元件
 
-- `crawl.engine`：run lifecycle、persistent queue worker、status transition、signal pause 與 challenge circuit breaker。
-- `crawl.fetcher`：單次 GET。正常 CookieJar、固定 User-Agent、timeout 與 per-host delay；不含 bypass 能力。
-- `crawl.robots` / `crawl.sitemap` / `crawl.discovery`：robots gate、nested/XML.GZ sitemap 與 HTML/data/meta/simple-location URL 發現。
-- `crawl.classifier`：URL route、query、DOM heading 與 table header 共同分類。
-- `db.repository`：單一 aiosqlite connection 與 write lock；raw response、queue、status、backup 與 DB health query。
-- `parsers.base`：generic metadata/table/breadcrumb parser。Toyota、Audi、Renault adapter 只處理欄位名稱差異。
-- `services.ingest`：冪等 normalized 寫入與 `record_sources`。
-- `services.archive_import`：匯入 Common Crawl、Wayback 或使用者合法持有的 HTML；不連線 PartSouq，先保存 raw response 與 archive provenance，再以 unverified historical derivation 寫入。
-- `services.reparse`：只讀 raw body，重新分類與解析，不發 HTTP request。
-- `services.export`：verified fitment 為預設；compatibility hint 與 unverified historical fitment 都必須明確 opt in。
+- `crawl.engine`：run lifecycle、queue worker、lease heartbeat、fencing、signal pause、challenge circuit breaker。
+- `crawl.fetcher`：aiohttp 正常 GET、固定 UA、timeout、Retry-After 與 per-host delay。
+- `crawl.browser_fetcher`：標準 Playwright browser transport。使用 fresh context，不讀既有 Brave profile、不搬 cookie、不含 stealth。
+- `crawl.robots`／`crawl.sitemap`／`crawl.discovery`：robots gate、nested sitemap、gzip sitemap 與 HTML/data/meta/form URL discovery。
+- `crawl.challenge`：集中判斷 403、`cf-mitigated: challenge`、Cloudflare title/body markers。
+- `db.mysql_connection`：aiomysql pool、UTC、READ COMMITTED、schema migration、transaction rollback。
+- `db.repository`：persistent state、raw-first response、queue fencing、archive queue、status 與 health query。
+- `services.ingest`：依資料層次批次 upsert/select，再批次寫 `record_sources`；沒有 per-part SQL loop。
+- `services.reparse`：只讀 MySQL raw body，以目前 parser 重播；不連 PartSouq。
+- `services.export`：以 `(record_id, provenance_id)` keyset 每批 1,000 筆輸出。
 
-## 歷史封存資料流
+## Challenge failure boundary
+
+Challenge 是來源不可用狀態，不是空型錄：
+
+1. 完整 response 先寫 `response_bodies` 與 `http_responses`。
+2. Queue item 變成 `challenged`。
+3. Run 變成 `blocked`，保存 reason。
+4. 共用熔斷器停止 HTTP、Playwright 或其他正常 driver 取得新 item。
+5. CLI 回非 0；`strict_complete=false`。
+6. Challenge body 不進 parser，也不會建立 normalized record。
+
+Driver 只可因一般相容性問題切換。已偵測 challenge 後，不允許改用 Selenium、stealth、UA 輪替、代理、CAPTCHA solver 或 `cf_clearance` 搬運繼續嘗試。
+
+## Historical archive data flow
 
 ```text
-Common Crawl WARC / Wayback capture / lawful owned HTML
-                         │
-                         ▼
-           raw response + SHA-256 FIRST
-                         │
-                         ▼
-  archive_captures(capture time / digest / WARC location / truncation)
-                         │
-                         ▼
-             parser + normalized records
-                         │
-                         ▼
-      is_verified=0 + historical_archive derivation
+Common Crawl CDXJ/WARC ─┐
+Wayback CDX/playback ───┼─► manifest + MySQL archive queue
+owned HTML ─────────────┘             │
+                                      ▼
+                     raw response + archive capture
+                                      │
+                           challenge/content gate
+                                      │
+                                      ▼
+                         parser + unverified records
+                                      │
+                                      ▼
+                       source_mode=historical_archive
+                       current_or_complete=false
 ```
 
-歷史封存 run 固定為 `completed_with_gaps`，不會更新 live/current view。截斷頁可保存已出現的直接記錄，但不能宣稱該頁或該車型完整。
+- Common Crawl 只根據本機 index 的 WARC locator 做 HTTP Range download。
+- Wayback 只接受本機 CDX JSON，allowlist 是 `/en/catalog` 與子路徑；VIN path 與明確 17 碼 VIN query 預設排除。
+- 每個 index item 先 enqueue；done/challenged/http_error/parse_failed 是永久終態，network failure 可續跑。
+- Claim 與 finalize 都帶 fencing token，失效 worker 不能把 item 誤標完成。
+- Body、HTTP response 與 `archive_captures` 在同一 transaction 冪等寫入；parser 可以在下一個 transaction 重播。
+- Archive fitment 固定 `is_verified=0`，derivation 明確包含 archive source。
+- Archive run 固定 `completed_with_gaps`／`current_or_complete=false`，不會取代 live current view。
 
-## 狀態與提交順序
+## Legacy SQLite migration
 
-Queue 工作先取得有期限 lease。收到 response 後的提交順序固定為：
+SQLite 只是一個舊資料輸入格式：
 
-1. `response_bodies` 去重保存。
-2. `http_responses` 保存 request/final URL、status、headers 與 SHA。
-3. challenge detector 判斷；命中就將 queue 設為 `challenged`、run 設為 `blocked`，停止發新 request。
-4. 正常 HTML/XML 才能 discovery 與 parse。
-5. normalized record 與 provenance 同一 transaction 寫入。
-6. queue 最後才轉成 `done`。
+1. 用 SQLite Backup API 建立封閉 snapshot，避免漏掉 WAL。
+2. 對 snapshot 與每個未壓縮 body 計算 SHA-256。
+3. 依 `archive_captures.id` keyset 分批讀取。
+4. MySQL 同一 transaction 寫 body、response、capture 與 import item。
+5. 用目前 parser 從 raw body 重建 normalized records；不直接信任舊 normalized table。
+6. 對帳 source/target body hash、capture identity、parse count、provenance、orphan 與 FK。
+7. 同一 snapshot 重跑時全部 skip；差異或損壞進 quarantine，不能靜默完成。
 
-程序在第 1 至 5 步崩潰時，lease 到期後會恢復 pending。已存在 raw response 仍保留作證據；正常重啟不會重抓已經 `done` 的 URL。
+## CRUD 後台
 
-429 會保存 response、尊重 `Retry-After`、將工作延後並 pause run。500/502/503/504 與 transport timeout 才會 exponential backoff + jitter。404/410 是 `gone` terminal。parser error 是 `parse_failed`，不重抓即可用 `reparse` 修復。
+```text
+MySQL immutable source tables ───────► effective record view
+             ▲                              ▲
+             │ provenance                   │ overlay
+             │                              │
+raw responses / archive captures     admin_override_heads
+                                             │
+                                             ▼
+                                    admin_override_events
+                                      append-only audit
+```
 
-## URL identity
+- Flask/Jinja/PyMySQL，只綁 `127.0.0.1`。
+- Entity/type/table/field 都由固定 allowlist 映射，不接受 URL 拼 SQL identifier。
+- `partsouq_admin` 對 source table 只有 SELECT；MySQL 權限是最後一道防線。
+- 人工 create/update/retire/restore 寫 overlay，不改 source evidence。
+- `expected_revision` + row lock 防止 lost update；衝突回 409。
+- CSRF、Strict session cookie、CSP、no-referrer、nosniff 都由 app 固定設定。
+- Raw response 不 inline render；raw HTML 只能明確下載。
 
-去重只做：scheme/hostname 小寫、default port 移除、fragment 移除、空 path 轉 `/`。path 與原始 query string保持不變，參數不排序、不移除，`ssd` 視為 opaque token。Redirect history 與 final URL 存在 response，不會覆寫 queue 的 requested URL。
+### No-N+1 contract
 
-## 完整性邊界
-
-Crawler 的閉包是 seed、robots sitemap、nested sitemap 與已取得 HTML 公開連結所發現的 allowed URLs。它不枚舉 VIN/Frame、不登入，也不能證明網站中無連結的隱藏資料存在與否。
-
-`completed` 必須 queue 耗盡且沒有 failed/challenged/skipped_robots/parse_failed。任何 gap 都是 `completed_with_gaps`，外部阻斷則是 `blocked`。`crawl-status` 另外以 foreign keys 與 provenance 完整性計算 `strict_complete`。
+- Dashboard：固定 2 次 SQL。
+- List：固定 3 次 SQL。第一個 query 只取當頁 key；後兩個 query 批次取得 source 與 manual records。
+- Detail：固定 4 次 SQL；audit 與 provenance fanout 各自最多 100 筆。
+- List 使用 signed-order keyset，不用 `OFFSET` 或每頁 `COUNT(*)`。
+- Prefix search 以每欄 index range 的 `UNION` 產生 source candidates；只有小型 overlay JSON 做 substring search。
+- 每條 SQL 都有 query tag 與 normalized fingerprint。測試用 1／100／10,000 筆及高 fanout fixture，要求 query count 與 fingerprint 不變。
+- MySQL integration 另驗 source row hash 不變、低權限 direct UPDATE 失敗、CRUD audit 完整。
 
 ## NHTSA data flow
 
 ```text
-NHTSA official bulk files / allowlisted API endpoints
-                         │
-                         ▼
-       content-addressed raw artifact on disk
-                         │
-                         ▼
-      ZIP + CRC + member + schema validation
-                         │
-               ┌─────────┴─────────┐
-               ▼                   ▼
-       parsed source rows     rejected rows
-               │                   │
-               ▼                   ▼
-      MySQL record versions    quarantined artifact
-               │
-               ▼
-        artifact/row lineage
-               │
-       all selected sources pass
-               │
-               ▼
-   atomic nhtsa_current_artifacts publish
+official bulk ZIP/CSV or allowlisted API
+                   │
+                   ▼
+      local content-addressed raw artifact
+                   │
+      ZIP magic / CRC / member / schema gate
+                   │
+                   ▼
+ record versions + artifact/member/line lineage
+                   │
+      all selected artifacts imported, rejects=0
+                   │
+                   ▼
+       atomic current artifact pointers
+                   │
+                   ▼
+           nhtsa_current_records
 ```
 
-NHTSA 設計邊界：
+- Bulk 優先；API client 只能呼叫程式內明列的 CSSI／vPIC 集合 endpoint。
+- VIN decode、VIN range、任意 URL 都由 policy guard 拒絕。
+- 完整官方 payload 存 MySQL JSON；raw bytes 另依 SHA-256 保存在 Git ignore 目錄。
+- Artifact/member/source line/parser version 全部可追溯。
+- Quarantined artifact 與 rejected row 保留作稽核，但不會更新 current pointer。
 
-- API client 只接受 `vpic.nhtsa.dot.gov` 與 `api.nhtsa.gov` 的明列 endpoint；VIN decode 與 VIN 枚舉不在 allowlist。
-- bulk 檔與 API JSON 都先保存 raw bytes，再解析及入庫。
-- parser schema 改變時以版本隔離；已 quarantined 的內容不會被靜默重用。
-- `nhtsa_record_versions` 保存歷史 payload；`nhtsa_current_artifacts` 只指向本次完整驗證的來源集合。
-- 同一官方 artifact 的重複列或不同更新日期會保留每個來源行號；不同 artifact 對同一 natural key 提供不同內容時會阻擋發佈。
-- 每一批資料各自 transaction，不用單一超大 transaction；範圍發佈本身保持原子性。
+## 完成條件
+
+PartSouq live 的 strict completion：
+
+```text
+queue exhausted
+AND failed = 0
+AND challenged = 0
+AND skipped_robots = 0
+AND parse_failed = 0
+AND missing provenance = 0
+AND foreign key violations = 0
+```
+
+「queue exhausted」只代表所有已由 seed／robots／sitemap／HTML 發現且在 allowlist 的 URL 已處理；不代表不可發現、私人或受存取控制的頁面也已取得。
+
+NHTSA current completion：指定 scope 的 expected source manifest 全部 imported、source rows 對帳、rejected=0，才允許發布 current pointers。

@@ -1,56 +1,149 @@
-# PartSouq 與 NHTSA 官方資料同步器
+# PartSouq 型錄與 NHTSA 官方資料同步器
 
-這是一套 evidence-first、可斷點續爬的 Python crawler。它只讀取 PartSouq 公開頁面，先保存每次實際 HTTP response，再解析車輛、分類、圖組、零件與 fitment 到本機 SQLite。
+這是 Python 3.12+ 的 evidence-first 資料管線。PartSouq 與 NHTSA 的 CLI 都直接寫入本機 MySQL 8。內部仍保留 SQLite adapter，僅供舊 archive snapshot 的一次性唯讀遷移與隔離單元測試；它不是 production backend。
 
-它不會解 CAPTCHA、注入 `cf_clearance`、輪替 proxy 或繞過 Cloudflare。遇到 challenge 時會保存證據、將 run 標成 `blocked`，並以非 0 code 結束。
+目前已確認的邊界：
 
-NHTSA 路徑與 PartSouq 分離：NHTSA 使用官方 bulk download／API，normalized 資料直接寫入 MySQL，raw ZIP／CSV／JSON 以 SHA-256 命名保存在本機。NHTSA 不使用 SQLite。
+- PartSouq live：標準 HTTP 與 headed Brave／Playwright 都會收到 Cloudflare challenge。系統會先保存 raw response，再把 run 標成 `blocked` 並停止；不會把 challenge HTML 當型錄，也不會使用 stealth、CAPTCHA solver、代理或 cookie 搬運。
+- PartSouq archive：可從 Common Crawl WARC、Wayback CDX 及合法持有的 HTML 取得真實歷史型錄。全部標為 `historical_archive`，fitment 固定是 unverified，不會冒充 current。
+- NHTSA：已實作官方 bulk files、CSSI 與 vPIC allowlist endpoint 的完整 raw artifact、版本、lineage 與 current pointer 流程。
+
+資料表、最新實測數量及未完成範圍請看 [需求與驗收文件](docs/requirements-notes-schema.md)。
 
 ## 安裝
 
-需要 Python 3.12 以上。建議使用 `uv`：
-
 ```bash
-uv sync --extra dev
+uv sync --extra dev --frozen
 source .venv/bin/activate
 partsouq-crawler --help
 ```
 
-或使用標準 virtualenv：
+## 啟動本機 MySQL
+
+Compose 綁定 `127.0.0.1:3308`，建立 `partsouq`、`partsouq_test`、`nhtsa` 及低權限後台帳號：
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -e '.[dev]'
-```
-
-## NHTSA：啟動 MySQL
-
-此 Compose 只建立專案自己的 `nhtsa-mysql`，綁定 `127.0.0.1:3308`，不會碰本機既有的 3306 MySQL：
-
-```bash
-docker compose -f compose.nhtsa.yml up -d
 cp -n .env.example .env
+docker compose -f compose.nhtsa.yml up -d
 ```
 
-預設建立 `nhtsa` 與測試專用的 `nhtsa_test`。正式環境請覆寫 `.env` 內的密碼；`.env` 不應提交。
+預設密碼只供本機開發。正式環境必須覆寫 `.env`；不得提交 `.env`、raw artifact、DB volume、archive index 或匯出資料。
 
-## NHTSA：資料範圍與全量同步
+## PartSouq live crawler
 
-目前同步 NHTSA 官方 Vehicle Safety 資料：
+設定固定且可聯絡的 User-Agent：
 
-- Safety Ratings
-- Recalls
-- Investigations
-- Complaints
-- Manufacturer Communications summary
-- Manufacturer Communications／TSB detail
-- CSSI car-seat inspection stations（全州與領地）
-- vPIC makes、models、manufacturers、variables、variable values
+```bash
+export PARTSOUQ_USER_AGENT='YourCrawler/1.0 (contact: you@example.com)'
+scripts/run_full_catalog.sh
+```
 
-提供的需求附件沒有 NHTSA 段落，因此本實作以 NHTSA 官方 Datasets and APIs 頁面的 Vehicle Safety 範圍為準；FARS crash statistics 不在目前範圍。
+等價命令：
 
-執行：
+```bash
+partsouq-crawler crawl-all \
+  --run-id partsouq-genuine-full \
+  --seed-url 'https://partsouq.com/en/catalog/genuine' \
+  --max-pages 0 --max-depth 0 \
+  --concurrency 1 --delay 5 \
+  --robots-policy require \
+  --user-agent "$PARTSOUQ_USER_AGENT"
+```
+
+`0` 代表 unlimited。同一個 `--run-id` 重跑會延續 MySQL persistent queue；完成項目不會重抓，過期 lease 會回收。Queue claim 使用 `FOR UPDATE SKIP LOCKED`，完成寫入帶 worker 與 fencing token，舊 worker 無法覆寫新租約結果。
+
+### 標準 Brave／Playwright transport
+
+這條 transport 只處理一般瀏覽器 JavaScript，不隱藏自動化身分。任一 driver 偵測到 challenge 後會啟動共用熔斷器：
+
+```bash
+partsouq-crawler crawl-all \
+  --run-id partsouq-browser-live \
+  --seed-url 'https://partsouq.com/en/catalog/genuine' \
+  --max-pages 10 --max-depth 0 \
+  --concurrency 1 --delay 5 --retry-count 0 \
+  --robots-policy require \
+  --transport browser \
+  --browser-executable '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser'
+```
+
+Playwright 與 Selenium 是替代 driver，不需要疊加。Selenium 不能讓已出現的 Cloudflare challenge 變成一般內容；`selenium-stealth`、`undetected-chromedriver`、`pyppeteer-stealth` 等套件的目的包含隱藏自動化或規避偵測，因此本專案不安裝、不測試。
+
+## PartSouq 歷史 archive
+
+Common Crawl 與 Wayback 都先把每筆 index item 寫進 MySQL queue，再下載、保存 raw response／SHA-256／archive 座標、解析與寫 provenance。中斷後用相同命令續跑。
+
+```bash
+partsouq-crawler common-crawl-import \
+  --run-id partsouq-common-crawl-full \
+  --index /path/to/CC-MAIN-index.ndjson \
+  --delay 0.25 --timeout 60
+
+partsouq-crawler wayback-import \
+  --run-id partsouq-wayback-full \
+  --index /path/to/wayback-page-0.json \
+  --index /path/to/wayback-page-1.json \
+  --delay 2 --timeout 60
+```
+
+合法持有的單一 HTML：
+
+```bash
+partsouq-crawler archive-import \
+  --run-id owned-capture-20260810 \
+  --input /path/to/capture.html \
+  --source-url 'https://partsouq.com/en/catalog/genuine/diagram?...' \
+  --archive-source owned_export \
+  --captured-at '2026-08-10T00:00:00Z'
+```
+
+舊 SQLite archive snapshot 可做一次性、可重入的 raw replay：
+
+```bash
+partsouq-crawler sqlite-archive-migrate \
+  --source-sqlite /path/to/legacy-archive.sqlite3 \
+  --run-id legacy-archive-migration \
+  --batch-size 500
+```
+
+遷移會對封閉 snapshot 計算 SHA-256、重算每個 raw body hash、保留 capture provenance、用目前 parser 重播，再檢查 body 差集、provenance、orphan 與 foreign key。SQLite 不會成為執行中的 queue 或資料庫。
+
+## 狀態、raw response、reparse、export
+
+```bash
+partsouq-crawler crawl-status --run-id partsouq-genuine-full
+partsouq-crawler db-status
+partsouq-crawler problem-urls --run-id partsouq-genuine-full --format jsonl
+
+partsouq-crawler dump-response --response-id 1 --output output/response-1.html
+partsouq-crawler reparse --response-id 1
+partsouq-crawler export --output output/fitments.csv
+partsouq-crawler export \
+  --output output/historical.jsonl \
+  --include-unverified-fitments
+```
+
+Export 使用 `(record_id, provenance_id)` keyset，每批 1,000 筆，不會一次載入全表。預設遮蔽 URL 裡的 `ssd`、VIN 與 17 碼 VIN 值；只有確定檔案留在本機時，才可明確加 `--include-sensitive-source-urls`。
+
+`strict_complete=true` 必須同時滿足：queue 耗盡、無 failed／challenged／robots skip／parse failure、provenance 完整、foreign key 完整。Archive run 永遠會明確標示不是 current/full。
+
+## 本機 CRUD 後台
+
+```bash
+export PARTSOUQ_ADMIN_SECRET_KEY='replace-with-a-local-random-secret'
+partsouq-admin
+open http://127.0.0.1:8086/
+```
+
+後台可瀏覽、搜尋、人工建立、更新、停用及恢復車型、diagram、料號、occurrence 與 fitment。Crawler source tables 對 `partsouq_admin` 只有 `SELECT`；所有人工異動寫入 overlay 與 append-only audit event，不會改掉 raw source fact。
+
+後台沒有對外登入機制，因此啟動程式只接受 `127.0.0.1`、`localhost` 或 `::1`；不得改成對外網卡。列表固定 3 條 SQL，detail 固定 4 條 SQL，來源 URL 裡的 `ssd`／VIN 在畫面預設遮蔽。
+
+列表使用 keyset 分頁與批次載入。Query tag／fingerprint 由測試固定，資料量或 fanout 增加時不會形成 N+1。
+
+## NHTSA
+
+目前範圍：Safety Ratings、Recalls、Investigations、Complaints、Manufacturer Communications summary/detail、CSSI、vPIC makes/models/manufacturers/variables/variable values。
 
 ```bash
 partsouq-crawler nhtsa-sync-bulk --scope all --run-id nhtsa-bulk-full
@@ -58,190 +151,20 @@ partsouq-crawler nhtsa-sync-api --scope all --run-id nhtsa-api-full
 partsouq-crawler nhtsa-status
 ```
 
-也可先按範圍執行：
+每個 raw ZIP／CSV／JSON 先以 SHA-256 保存，驗證 ZIP member、CRC、欄位 schema 與逐列解析，再批次寫 MySQL。只有選定 scope 的全部 artifact 都成功且拒絕列為 0，才會原子更新 current pointers。VIN decode、VIN 枚舉與任意 API URL會被 policy 拒絕。
+
+## 備份與驗收
 
 ```bash
-partsouq-crawler nhtsa-sync-bulk --scope safety-ratings
-partsouq-crawler nhtsa-sync-bulk --scope recalls
-partsouq-crawler nhtsa-sync-bulk --scope investigations
-partsouq-crawler nhtsa-sync-bulk --scope complaints
-partsouq-crawler nhtsa-sync-bulk --scope manufacturer-communications-summary
-partsouq-crawler nhtsa-sync-bulk --scope manufacturer-communications
-partsouq-crawler nhtsa-sync-api --scope vpic
-partsouq-crawler nhtsa-sync-api --scope cssi
-```
+scripts/backup_database.sh
 
-每個來源先下載到 `NHTSA_RAW_DIR`，檢查 ZIP member、CRC、欄位 schema 與逐列解析，再批次寫入 MySQL。選定範圍只有在全部 artifact 都 `imported` 且零拒絕時，才會原子更新 current view。失敗資料會保留並標成 `quarantined`，不會冒充完成。
-
-`output/` 已由 Git 忽略。Complaints、CSSI 等官方資料可能含 VIN 或聯絡欄位，不要把 raw artifact、DB volume 或匯出檔提交到 GitHub。
-
-vPIC 只允許程式內明列的集合型 endpoint。VIN decode、VIN 批次 decode、VIN 枚舉與任意 URL 都會被 policy 拒絕。
-
-## 低頻 probe
-
-```bash
-partsouq-crawler probe \
-  'https://partsouq.com/en/catalog/genuine' \
-  --sqlite output/partsouq-live.sqlite3 \
-  --user-agent "$PARTSOUQ_USER_AGENT"
-```
-
-Probe 每次只發一個正常 GET。response 會先寫進 DB。403 challenge 不會被解析成型錄資料。
-
-### 標準 Playwright／Brave transport
-
-若要讓一般 JavaScript 在真正瀏覽器網路堆疊中執行，可改用本機 Brave：
-
-```bash
-partsouq-crawler probe \
-  'https://partsouq.com/en/catalog/genuine' \
-  --sqlite output/partsouq-browser-live.sqlite3 \
-  --transport browser \
-  --browser-executable '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser'
-```
-
-Browser transport 預設為 headed、強制 `concurrency=1`，並使用全新的暫時 browser context。它不讀取既有 Brave profile，不匯入／匯出 cookie，也不包含 stealth、代理或 CAPTCHA solver。response 仍先寫入原本的 SQLite DB-first pipeline；一偵測到 challenge 就停止。
-
-2026-08-10 的實際驗證結果：Brave/Playwright 可讀到 `robots.txt` 200，但 Genuine Catalog 入口仍回傳 `HTTP 403` 與 `cf-mitigated: challenge`。Run 正確標為 `blocked`，正式型錄資料新增 0 筆。
-
-## PartSouq 歷史封存匯入
-
-Common Crawl 與 Internet Archive Wayback 的公開歷史快照可在不連線 PartSouq 的情況下提供真實型錄 HTML。這些資料必須標示為 `historical_archive`，不能當成 live/current 或全量資料。
-
-已下載的 Common Crawl CDXJ index 可直接批次匯入。匯入器只接受精確的 `/en/catalog/genuine/diagram` 路徑，預設排除 query 中的 17 碼 VIN，並依 WARC filename／offset／length 斷點續跑：
-
-```bash
-partsouq-crawler common-crawl-import \
-  --sqlite output/partsouq-common-crawl.sqlite3 \
-  --run-id common-crawl-diagrams \
-  --index /path/to/CC-MAIN-index.ndjson \
-  --delay 0.25 --timeout 60
-```
-
-2026-08-10 實測三期 index 共選出 142 筆 diagram captures，142 筆下載成功、0 筆失敗。115 筆型錄頁解析出 2,945 個唯一料號與 5,928 筆 occurrence；另 27 筆為歷史 Cloudflare challenge，已保留 raw response 但沒有進 parser。全部 fitment 都維持 `is_verified=0`，不能視為 current 或全量。
-
-先取得合法公開的 HTML capture，再匯入：
-
-```bash
-partsouq-crawler archive-import \
-  --sqlite output/partsouq-archive.sqlite3 \
-  --run-id archive-example \
-  --input /path/to/capture.html \
-  --source-url 'https://partsouq.com/en/catalog/genuine/diagram?...' \
-  --archive-source wayback \
-  --captured-at '2021-07-24T01:23:19Z'
-```
-
-匯入順序是 raw body／SHA-256、`archive_captures` provenance、parser、normalized tables。歷史 fitment 固定為 `is_verified=0`。預設 export 仍只輸出 verified fitment；要檢視歷史資料必須明確指定：
-
-```bash
-partsouq-crawler export \
-  --sqlite output/partsouq-archive.sqlite3 \
-  --output output/partsouq-archive.csv \
-  --include-unverified-fitments
-```
-
-Archive index、raw HTML、DB 與 CSV 可能含 `ssd` 或 VIN。它們都留在 Git ignore 的輸出目錄，不得上傳 GitHub。
-
-## 全量執行與續爬
-
-設定具聯絡方式的固定 User-Agent：
-
-```bash
-export PARTSOUQ_USER_AGENT='YourCrawler/1.0 (contact: you@example.com)'
-scripts/run_full_catalog.sh
-```
-
-等價完整指令：
-
-```bash
-partsouq-crawler crawl-all \
-  --run-id partsouq-genuine-full \
-  --seed-url 'https://partsouq.com/en/catalog/genuine' \
-  --sqlite output/partsouq-live.sqlite3 \
-  --max-pages 0 \
-  --max-depth 0 \
-  --concurrency 1 \
-  --delay 5 \
-  --robots-policy require \
-  --user-agent "$PARTSOUQ_USER_AGENT"
-```
-
-改用 browser transport 時，附加：
-
-```bash
---transport browser \
---browser-executable '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser'
-```
-
-`0` 代表 unlimited。中斷後用相同 `--run-id` 與 SQLite 路徑重跑即可；已完成 URL 不會重新 request，過期 lease 會恢復成 pending。
-
-SIGINT/SIGTERM 會停止取得新工作。正在處理的 request 結束後，run 會標為 `paused`。若程序被強制終止，下次會回收過期 lease。
-
-## 狀態與問題頁
-
-```bash
-partsouq-crawler crawl-status --sqlite output/partsouq-live.sqlite3 --run-id partsouq-genuine-full
-partsouq-crawler db-status --sqlite output/partsouq-live.sqlite3
-partsouq-crawler problem-urls --sqlite output/partsouq-live.sqlite3 --run-id partsouq-genuine-full --format jsonl
-```
-
-`strict_complete=true` 只會在 queue 耗盡、沒有 failed/challenged/skipped_robots/parse_failed、provenance 完整且 foreign key check 通過時出現。完成報告代表「所有已發現、scope 內 URL 已處理」，不代表網站中不可發現或私人資料也已下載。
-
-Challenge 不會自動循環。取得正式 allowlist、API 或合法可存取環境後，才由使用者明確 requeue：
-
-```bash
-partsouq-crawler requeue-problems \
-  --sqlite output/partsouq-live.sqlite3 \
-  --run-id partsouq-genuine-full \
-  --status challenged
-```
-
-## Raw response、reparse、export、backup
-
-```bash
-partsouq-crawler dump-response --sqlite output/partsouq-live.sqlite3 --response-id 1 --output output/response-1.html
-partsouq-crawler reparse --sqlite output/partsouq-live.sqlite3 --run-id 1
-partsouq-crawler export --sqlite output/partsouq-live.sqlite3 --output output/fitments.csv
-partsouq-crawler export --sqlite output/partsouq-live.sqlite3 --output output/all.jsonl --include-compatibility-hints
-partsouq-crawler db-backup --sqlite output/partsouq-live.sqlite3 --output output/backup.sqlite3
-partsouq-crawler snapshot-publish --sqlite output/partsouq-live.sqlite3 --output output/partsouq-current.sqlite3
-```
-
-`snapshot-publish` 會在同一目錄先建立一致性備份，執行 `PRAGMA integrity_check`，寫入 SHA-256 manifest，再於發布鎖保護下原子替換快照。後台只應讀取這個已發布快照，不應直接讀 live DB。
-
-`reparse` 只讀取 DB 的 raw body，不會打 PartSouq。normalized 寫入採冪等 natural key。CSV 預設只含 verified fitment，並防護 Excel 公式注入；`/search/all` 的文字只會輸出為 compatibility hint。
-
-Backup 使用 SQLite Backup API，不會直接複製執行中的 WAL DB。
-
-## DB 查詢
-
-```bash
-sqlite3 output/partsouq-live.sqlite3 '
-SELECT id, http_status, content_type, is_cloudflare_challenge,
-       requested_url, body_sha256, fetched_at
-FROM http_responses ORDER BY id DESC LIMIT 20;'
-```
-
-資料表與 provenance 查詢請看 [DATABASE.md](DATABASE.md)。資料流與 failure boundary 請看 [ARCHITECTURE.md](ARCHITECTURE.md)。本次完整需求、注意事項、實際進度與兩套 schema 另提供 [Markdown](docs/requirements-notes-schema.md) 及 [HTML](docs/requirements-notes-schema.html)。
-
-## 驗證
-
-```bash
-python -m pytest
+NHTSA_TEST_MYSQL=1 PARTSOUQ_TEST_MYSQL=1 python -m pytest
 ruff check .
 ruff format --check .
 mypy src
+git diff --check
 ```
 
-測試 DB 與 fixture 只會寫到 pytest 的 temporary directory 或 `tests/tmp/`，不會寫入 `output/partsouq-live.sqlite3`。
+備份使用 `mysqldump --single-transaction --quick --hex-blob`，另寫 SHA-256。備份與匯出可能含敏感 query token，只能留在 Git ignore 的 `output/`。
 
-## 常見問題
-
-**為什麼 run 是 blocked？** 先用 `dump-response` 檢查保存的 response。若為 Cloudflare challenge，crawler 會停機，不會繞過。
-
-**robots.txt 讀不到怎麼辦？** `--robots-policy require` 會將 run 標為 blocked。它不會默認允許。`robots` 允許也不等於商業重製授權。
-
-**`0605-` 為什麼沒有解析日期？** 沒有品牌與頁面上下文時格式不確定，normalized 日期保持 NULL，raw value 永遠保留。
-
-**為什麼同一料號有多列？** 料號可對應不同 Vehicle、Diagram、Range、Condition、Callout 與 Note；這些 occurrence 不可互相覆蓋。
+發布 GitHub 前，必須確認 remote owner、SSH welcome 與 Brave 目前登入帳號三者都是 `a861252012`；禁止使用 Bibian 公司帳號或憑證。

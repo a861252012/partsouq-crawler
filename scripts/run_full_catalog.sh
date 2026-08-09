@@ -17,7 +17,6 @@ fi
 exec partsouq-crawler crawl-all \
     --run-id partsouq-genuine-full \
     --seed-url 'https://partsouq.com/en/catalog/genuine' \
-    --sqlite "${PARTSOUQ_DATABASE:-output/partsouq-live.sqlite3}" \
     --max-pages 0 \
     --max-depth 0 \
     --concurrency "${PARTSOUQ_CONCURRENCY:-1}" \

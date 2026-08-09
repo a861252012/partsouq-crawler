@@ -10,7 +10,7 @@ from typing import Any
 
 import pymysql
 
-from partsouq_crawler.config import DEFAULT_SEED, CrawlerConfig
+from partsouq_crawler.config import DEFAULT_SEED, CrawlerConfig, PartSouqMySQLConfig
 from partsouq_crawler.crawl.challenge import detect_challenge
 from partsouq_crawler.crawl.engine import CrawlerEngine
 from partsouq_crawler.crawl.fetcher import FetchError
@@ -30,6 +30,8 @@ from partsouq_crawler.services.common_crawl_import import CommonCrawlImportServi
 from partsouq_crawler.services.export import ExportService
 from partsouq_crawler.services.ingest import IngestService
 from partsouq_crawler.services.reparse import ReparseService
+from partsouq_crawler.services.sqlite_archive_import import SQLiteArchiveImportService
+from partsouq_crawler.services.wayback_import import WaybackImportService
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -38,14 +40,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     probe = subparsers.add_parser("probe", help="Fetch one URL once and store its response")
     probe.add_argument("url")
-    _database_argument(probe)
+    _partsouq_mysql_arguments(probe)
     probe.add_argument("--run-id", default="partsouq-live-probe")
     probe.add_argument("--user-agent")
     probe.add_argument("--timeout", type=float, default=30.0)
     _transport_arguments(probe)
 
     crawl = subparsers.add_parser("crawl-all", help="Resume or start full discovery crawl")
-    _database_argument(crawl)
+    _partsouq_mysql_arguments(crawl)
     crawl.add_argument("--run-id", required=True)
     crawl.add_argument("--seed-url", default=DEFAULT_SEED)
     crawl.add_argument("--max-pages", type=int, default=0)
@@ -60,60 +62,50 @@ def build_parser() -> argparse.ArgumentParser:
     _transport_arguments(crawl)
 
     status = subparsers.add_parser("crawl-status")
-    _database_argument(status)
+    _partsouq_mysql_arguments(status)
     status.add_argument("--run-id", required=True)
 
     db_status = subparsers.add_parser("db-status")
-    _database_argument(db_status)
+    _partsouq_mysql_arguments(db_status)
 
     problems = subparsers.add_parser("problem-urls")
-    _database_argument(problems)
+    _partsouq_mysql_arguments(problems)
     problems.add_argument("--run-id", required=True)
     problems.add_argument("--format", choices=("jsonl", "csv"), default="jsonl")
     problems.add_argument("--output", type=Path)
 
     requeue = subparsers.add_parser("requeue-problems")
-    _database_argument(requeue)
+    _partsouq_mysql_arguments(requeue)
     requeue.add_argument("--run-id", required=True)
     requeue.add_argument(
         "--status", action="append", choices=("failed", "parse_failed", "challenged"), required=True
     )
 
     dump = subparsers.add_parser("dump-response")
-    _database_argument(dump)
+    _partsouq_mysql_arguments(dump)
     dump.add_argument("--response-id", type=int)
     dump.add_argument("--url")
     dump.add_argument("--sha256")
     dump.add_argument("--output", type=Path, required=True)
 
     reparse = subparsers.add_parser("reparse")
-    _database_argument(reparse)
+    _partsouq_mysql_arguments(reparse)
     reparse.add_argument("--response-id", type=int)
     reparse.add_argument("--run-id", type=int)
     reparse.add_argument("--page-type")
 
     export = subparsers.add_parser("export")
-    _database_argument(export)
+    _partsouq_mysql_arguments(export)
     export.add_argument("--output", type=Path, required=True)
     export.add_argument("--include-compatibility-hints", action="store_true")
     export.add_argument("--include-unverified-fitments", action="store_true")
-
-    backup = subparsers.add_parser("db-backup")
-    _database_argument(backup)
-    backup.add_argument("--output", type=Path, required=True)
-
-    publish = subparsers.add_parser(
-        "snapshot-publish",
-        help="Validate and atomically publish a read-only database snapshot",
-    )
-    _database_argument(publish)
-    publish.add_argument("--output", type=Path, required=True)
+    export.add_argument("--include-sensitive-source-urls", action="store_true")
 
     archive_import = subparsers.add_parser(
         "archive-import",
         help="Import a lawfully obtained historical HTML capture without contacting PartSouq",
     )
-    _database_argument(archive_import)
+    _partsouq_mysql_arguments(archive_import)
     archive_import.add_argument("--run-id", required=True)
     archive_import.add_argument("--input", type=Path, required=True)
     archive_import.add_argument("--source-url", required=True)
@@ -132,14 +124,34 @@ def build_parser() -> argparse.ArgumentParser:
 
     common_crawl_import = subparsers.add_parser(
         "common-crawl-import",
-        help="Download diagram WARC records listed in Common Crawl index files",
+        help="Import allowlisted PartSouq WARC records from Common Crawl index files",
     )
-    _database_argument(common_crawl_import)
+    _partsouq_mysql_arguments(common_crawl_import)
     common_crawl_import.add_argument("--run-id", required=True)
     common_crawl_import.add_argument("--index", type=Path, action="append", required=True)
     common_crawl_import.add_argument("--max-records", type=int, default=0)
     common_crawl_import.add_argument("--delay", type=float, default=0.25)
     common_crawl_import.add_argument("--timeout", type=float, default=60.0)
+
+    wayback_import = subparsers.add_parser(
+        "wayback-import",
+        help="Import allowlisted PartSouq captures from local Wayback CDX JSON files",
+    )
+    _partsouq_mysql_arguments(wayback_import)
+    wayback_import.add_argument("--run-id", required=True)
+    wayback_import.add_argument("--index", type=Path, action="append", required=True)
+    wayback_import.add_argument("--max-records", type=int, default=0)
+    wayback_import.add_argument("--delay", type=float, default=2.0)
+    wayback_import.add_argument("--timeout", type=float, default=60.0)
+
+    sqlite_migrate = subparsers.add_parser(
+        "sqlite-archive-migrate",
+        help="Migrate a legacy archive snapshot into the production MySQL schema",
+    )
+    _partsouq_mysql_arguments(sqlite_migrate)
+    sqlite_migrate.add_argument("--source-sqlite", type=Path, required=True)
+    sqlite_migrate.add_argument("--run-id")
+    sqlite_migrate.add_argument("--batch-size", type=int, default=100)
 
     nhtsa_sync = subparsers.add_parser(
         "nhtsa-sync-bulk",
@@ -166,8 +178,14 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _database_argument(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--sqlite", type=Path, default=Path("output/partsouq-live.sqlite3"))
+def _partsouq_mysql_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--mysql-host")
+    parser.add_argument("--mysql-port", type=int)
+    parser.add_argument("--mysql-database")
+    parser.add_argument("--mysql-user")
+    parser.add_argument("--mysql-password")
+    parser.add_argument("--mysql-pool-min", type=int)
+    parser.add_argument("--mysql-pool-max", type=int)
 
 
 def _transport_arguments(parser: argparse.ArgumentParser) -> None:
@@ -192,13 +210,21 @@ def _nhtsa_arguments(parser: argparse.ArgumentParser, *, include_runtime: bool =
 async def dispatch(args: argparse.Namespace) -> int:
     if args.command.startswith("nhtsa-"):
         return await _dispatch_nhtsa(args)
-    repository = await Repository.create(args.sqlite)
+    mysql_config = PartSouqMySQLConfig.from_env(
+        host=args.mysql_host,
+        port=args.mysql_port,
+        database=args.mysql_database,
+        user=args.mysql_user,
+        password=args.mysql_password,
+        pool_min_size=args.mysql_pool_min,
+        pool_max_size=args.mysql_pool_max,
+    )
+    repository = await Repository.create_mysql(mysql_config)
     try:
         if args.command == "probe":
             return await _probe(repository, args)
         if args.command == "crawl-all":
             config = CrawlerConfig.from_env(
-                database=args.sqlite,
                 concurrency=args.concurrency,
                 delay_seconds=args.delay,
                 request_timeout_seconds=args.timeout,
@@ -249,16 +275,9 @@ async def dispatch(args: argparse.Namespace) -> int:
                 args.output,
                 include_compatibility_hints=args.include_compatibility_hints,
                 include_unverified_fitments=args.include_unverified_fitments,
+                include_sensitive_source_urls=args.include_sensitive_source_urls,
             )
             _print_json({"output": str(args.output), "rows": count})
-            return 0
-        if args.command == "db-backup":
-            await repository.backup(args.output)
-            _print_json({"backup": str(args.output)})
-            return 0
-        if args.command == "snapshot-publish":
-            manifest = await repository.publish_snapshot(args.output)
-            _print_json({"snapshot": str(args.output), "manifest": manifest})
             return 0
         if args.command == "archive-import":
             archive_report = await ArchiveImportService(repository).import_html(
@@ -288,6 +307,31 @@ async def dispatch(args: argparse.Namespace) -> int:
             )
             _print_json(common_crawl_report)
             return 0 if common_crawl_report["failed"] == 0 else 1
+        if args.command == "wayback-import":
+            wayback_report = await WaybackImportService(repository).run(
+                run_key=args.run_id,
+                index_paths=args.index,
+                max_records=args.max_records,
+                delay_seconds=args.delay,
+                timeout_seconds=args.timeout,
+            )
+            _print_json(wayback_report)
+            queue = wayback_report["queue"]
+            return 0 if isinstance(queue, dict) and queue.get("failed", 0) == 0 else 1
+        if args.command == "sqlite-archive-migrate":
+            migration_report = await SQLiteArchiveImportService(repository).run(
+                sqlite_path=args.source_sqlite,
+                run_key=args.run_id,
+                batch_size=args.batch_size,
+            )
+            _print_json(migration_report)
+            failed = bool(
+                migration_report["quarantined"]
+                or migration_report["missing_provenance"]
+                or migration_report["orphans"]
+                or migration_report["foreign_key_violations"]
+            )
+            return 1 if failed else 0
         raise ValueError(f"unsupported command: {args.command}")
     finally:
         await repository.close()
@@ -337,7 +381,6 @@ async def _dispatch_nhtsa(args: argparse.Namespace) -> int:
 
 async def _probe(repository: Repository, args: argparse.Namespace) -> int:
     config = CrawlerConfig.from_env(
-        database=args.sqlite,
         request_timeout_seconds=args.timeout,
         max_retries=0,
         user_agent=args.user_agent,

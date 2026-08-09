@@ -17,12 +17,16 @@ services:
       MYSQL_DATABASE: nhtsa
       MYSQL_USER: nhtsa
       MYSQL_PASSWORD: ${NHTSA_MYSQL_PASSWORD:-nhtsa-local}
+      PARTSOUQ_MYSQL_PASSWORD: ${PARTSOUQ_MYSQL_PASSWORD:-partsouq-local}
+      PARTSOUQ_ADMIN_MYSQL_PASSWORD: ${PARTSOUQ_ADMIN_MYSQL_PASSWORD:-partsouq-admin-local}
       TZ: Asia/Taipei
     ports:
       - "127.0.0.1:3308:3306"
     volumes:
       - nhtsa_mysql_data:/var/lib/mysql
       - ./docker/mysql/init:/docker-entrypoint-initdb.d:ro
+      - ./src/partsouq_crawler/db/mysql_schema.sql:/opt/partsouq-schema/mysql_schema.sql:ro
+      - ./src/partsouq_crawler/admin/mysql_schema.sql:/opt/partsouq-schema/admin_mysql_schema.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -unhtsa -p$${MYSQL_PASSWORD} --silent"]
       interval: 5s

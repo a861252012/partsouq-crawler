@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from partsouq_crawler.crawl.challenge import detect_challenge
-from partsouq_crawler.db.repository import Repository
+from partsouq_crawler.db.repository import Repository, utc_now
 from partsouq_crawler.models.crawl import FetchResult
 from partsouq_crawler.parsers.base import CatalogParser, ParseError
 from partsouq_crawler.services.ingest import IngestService
@@ -25,6 +27,7 @@ class ArchiveCaptureInput:
     archive_digest: str | None = None
     truncation_reason: str | None = None
     metadata: dict[str, object] = field(default_factory=dict)
+    run_id: int | None = None
 
 
 class ArchiveImportService:
@@ -57,8 +60,12 @@ class ArchiveImportService:
             "archive_source": capture.archive_source,
             "current_or_complete": False,
         }
-        run_id = await self.repository.create_or_get_run(run_key, [capture.source_url], config)
-        await self.repository.set_run_status(run_id, "running")
+        run_id = capture.run_id or await self.repository.create_or_get_run(
+            run_key, [capture.source_url], config
+        )
+        manages_run = capture.run_id is None
+        if manages_run:
+            await self.repository.set_run_status(run_id, "running")
         result = FetchResult(
             requested_url=capture.source_url,
             final_url=capture.source_url,
@@ -69,25 +76,53 @@ class ArchiveImportService:
             attempt=1,
         )
         challenge = detect_challenge(result.status, result.headers, result.body)
-        response_id, body_sha256 = await self.repository.store_response(
-            run_id,
-            None,
-            result,
-            challenged=challenge.challenged,
-            challenge_reason=challenge.reason,
-        )
-        await self.repository.add_archive_capture(
-            response_id=response_id,
-            archive_source=capture.archive_source,
-            collection_name=capture.collection_name,
-            captured_at=capture.captured_at,
-            warc_filename=capture.warc_filename,
-            warc_offset=capture.warc_offset,
-            warc_length=capture.warc_length,
-            archive_digest=capture.archive_digest,
-            truncation_reason=capture.truncation_reason,
-            metadata=capture.metadata,
-        )
+        body_sha256 = hashlib.sha256(body).hexdigest()
+        if self.repository.backend_name == "mysql":
+            capture_key = self._capture_key(capture, body_sha256)
+            raw_result = await self.repository.import_archive_capture_raw(
+                run_id=run_id,
+                result=result,
+                expected_body_sha256=body_sha256,
+                challenged=challenge.challenged,
+                challenge_reason=challenge.reason,
+                fetched_at=capture.captured_at,
+                content_type=result.content_type,
+                charset=result.charset,
+                archive_source=capture.archive_source,
+                collection_name=capture.collection_name,
+                captured_at=capture.captured_at,
+                warc_filename=capture.warc_filename,
+                warc_offset=capture.warc_offset,
+                warc_length=capture.warc_length,
+                archive_digest=capture.archive_digest,
+                truncation_reason=capture.truncation_reason,
+                archive_imported_at=utc_now(),
+                metadata=capture.metadata,
+                capture_key=capture_key,
+                source_snapshot_sha256=None,
+                source_capture_id=None,
+            )
+            response_id = raw_result.response_id
+        else:
+            response_id, body_sha256 = await self.repository.store_response(
+                run_id,
+                None,
+                result,
+                challenged=challenge.challenged,
+                challenge_reason=challenge.reason,
+            )
+            await self.repository.add_archive_capture(
+                response_id=response_id,
+                archive_source=capture.archive_source,
+                collection_name=capture.collection_name,
+                captured_at=capture.captured_at,
+                warc_filename=capture.warc_filename,
+                warc_offset=capture.warc_offset,
+                warc_length=capture.warc_length,
+                archive_digest=capture.archive_digest,
+                truncation_reason=capture.truncation_reason,
+                metadata=capture.metadata,
+            )
 
         records_inserted = 0
         parts_parsed = 0
@@ -119,12 +154,13 @@ class ArchiveImportService:
                     parse_error,
                 )
 
-        await self.repository.set_run_status(
-            run_id,
-            "completed_with_gaps",
-            blocked_reason="historical_archive_not_current_or_complete",
-            ended=True,
-        )
+        if manages_run:
+            await self.repository.set_run_status(
+                run_id,
+                "completed_with_gaps",
+                blocked_reason="historical_archive_not_current_or_complete",
+                ended=True,
+            )
         return {
             "run_id": run_id,
             "run_key": run_key,
@@ -142,3 +178,25 @@ class ArchiveImportService:
             "error": error,
             "current_or_complete": False,
         }
+
+    @staticmethod
+    def _capture_key(capture: ArchiveCaptureInput, body_sha256: str) -> str:
+        supplied = capture.metadata.get("capture_key")
+        if isinstance(supplied, str) and len(supplied) == 64:
+            return supplied
+        identity = json.dumps(
+            [
+                capture.archive_source,
+                capture.collection_name,
+                capture.warc_filename,
+                capture.warc_offset,
+                capture.warc_length,
+                capture.captured_at,
+                capture.source_url,
+                capture.archive_digest,
+                body_sha256,
+            ],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(identity.encode()).hexdigest()

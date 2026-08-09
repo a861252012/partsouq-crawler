@@ -250,7 +250,8 @@ def test_archive_import_preserves_capture_and_does_not_verify_fitment(tmp_path: 
             capture=ArchiveCaptureInput(
                 input_path=input_path,
                 source_url=(
-                    "https://partsouq.com/en/catalog/genuine/diagram?c=Honda&number=31110P73A01"
+                    "https://partsouq.com/en/catalog/genuine/diagram?"
+                    "c=Honda&number=31110P73A01&ssd=opaque-secret"
                 ),
                 archive_source="wayback",
                 captured_at="2021-07-24T01:23:19Z",
@@ -275,6 +276,12 @@ def test_archive_import_preserves_capture_and_does_not_verify_fitment(tmp_path: 
         assert len(archive_rows) == 1
         assert archive_rows[0]["Source mode"] == "historical_archive"
         assert archive_rows[0]["Captured at"] == "2021-07-24T01:23:19Z"
+        assert "ssd=[REDACTED]" in archive_rows[0]["Source URL"]
+        sensitive_rows = await ExportService(repository).rows(
+            include_unverified_fitments=True,
+            include_sensitive_source_urls=True,
+        )
+        assert "ssd=opaque-secret" in sensitive_rows[0]["Source URL"]
         await repository.close()
 
     asyncio.run(scenario())

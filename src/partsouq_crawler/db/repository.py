@@ -4,17 +4,22 @@ import asyncio
 import hashlib
 import json
 import zlib
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import aiosqlite
 
+from partsouq_crawler.config import PartSouqMySQLConfig
 from partsouq_crawler.crawl.discovery import normalize_url
 from partsouq_crawler.db.backup import backup_database, publish_snapshot
 from partsouq_crawler.db.connection import connect
 from partsouq_crawler.db.migrations import migrate
+from partsouq_crawler.db.mysql_connection import MySQLPoolConnection, create_mysql_connection
+from partsouq_crawler.db.protocols import AsyncConnection, DatabaseRow
 from partsouq_crawler.models.crawl import FetchResult, QueueItem
 
 QUEUE_STATUSES = (
@@ -47,10 +52,37 @@ def utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _mysql_datetime(value: str) -> str:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC).replace(tzinfo=None).isoformat(sep=" ")
+
+
+@dataclass(frozen=True, slots=True)
+class ArchiveCaptureImportResult:
+    response_id: int
+    body_sha256: str
+    created: bool
+
+
+class LeaseLostError(RuntimeError):
+    pass
+
+
 class Repository:
-    def __init__(self, path: Path, connection: aiosqlite.Connection) -> None:
+    def __init__(
+        self,
+        path: Path | None,
+        connection: aiosqlite.Connection | MySQLPoolConnection,
+        *,
+        backend_name: str = "sqlite",
+        database_label: str | None = None,
+    ) -> None:
         self.path = path
         self.connection = connection
+        self.backend_name = backend_name
+        self.database_label = database_label or (str(path) if path else backend_name)
         self._write_lock = asyncio.Lock()
 
     @classmethod
@@ -59,12 +91,29 @@ class Repository:
         await migrate(connection)
         return cls(path, connection)
 
+    @classmethod
+    async def create_mysql(cls, config: PartSouqMySQLConfig) -> Repository:
+        connection = await create_mysql_connection(config)
+        return cls(
+            None,
+            connection,
+            backend_name="mysql",
+            database_label=config.public_dsn(),
+        )
+
     async def close(self) -> None:
+        if self.backend_name == "mysql":
+            await cast(MySQLPoolConnection, self.connection).close()
+            return
         await self.connection.execute("PRAGMA wal_checkpoint(PASSIVE)")
         await self.connection.close()
 
     @asynccontextmanager
-    async def transaction(self) -> AsyncIterator[aiosqlite.Connection]:
+    async def transaction(self) -> AsyncIterator[AsyncConnection | aiosqlite.Connection]:
+        if self.backend_name == "mysql":
+            async with cast(MySQLPoolConnection, self.connection).transaction() as connection:
+                yield connection
+            return
         async with self._write_lock:
             await self.connection.execute("BEGIN IMMEDIATE")
             try:
@@ -99,7 +148,7 @@ class Repository:
             raise RuntimeError("failed to create crawl run")
         return int(row["id"])
 
-    async def get_run(self, run_key: str) -> aiosqlite.Row | None:
+    async def get_run(self, run_key: str) -> DatabaseRow | aiosqlite.Row | None:
         cursor = await self.connection.execute(
             "SELECT * FROM crawl_runs WHERE run_key = ?", (run_key,)
         )
@@ -169,30 +218,34 @@ class Repository:
                 (run_id, source_response_id, parent_url, normalized, discovery_method, now),
             )
             inserted = cursor.rowcount == 1
-            if inserted:
-                await connection.execute(
-                    """
-                    UPDATE crawl_runs
-                    SET pages_discovered = pages_discovered + 1, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (now, run_id),
-                )
         return inserted
 
     async def recover_expired_leases(self, run_id: int) -> int:
         now = utc_now()
         async with self.transaction() as connection:
-            cursor = await connection.execute(
-                """
-                UPDATE crawl_queue
-                SET status = 'pending', worker_id = NULL, lease_expires_at = NULL,
-                    last_error = 'expired lease recovered'
-                WHERE run_id = ? AND status = 'in_progress'
-                  AND lease_expires_at IS NOT NULL AND lease_expires_at < ?
-                """,
-                (run_id, now),
-            )
+            if self.backend_name == "mysql":
+                cursor = await connection.execute(
+                    """
+                    UPDATE crawl_queue
+                    SET status = 'pending', worker_id = NULL, lease_expires_at = NULL,
+                        last_error = 'expired lease recovered'
+                    WHERE run_id = ? AND status = 'in_progress'
+                      AND lease_expires_at IS NOT NULL
+                      AND lease_expires_at < UTC_TIMESTAMP(6)
+                    """,
+                    (run_id,),
+                )
+            else:
+                cursor = await connection.execute(
+                    """
+                    UPDATE crawl_queue
+                    SET status = 'pending', worker_id = NULL, lease_expires_at = NULL,
+                        last_error = 'expired lease recovered'
+                    WHERE run_id = ? AND status = 'in_progress'
+                      AND lease_expires_at IS NOT NULL AND lease_expires_at < ?
+                    """,
+                    (run_id, now),
+                )
         return cursor.rowcount
 
     async def acquire_next(
@@ -206,30 +259,59 @@ class Repository:
         now = utc_now()
         lease = (datetime.now(UTC) + timedelta(seconds=lease_seconds)).isoformat()
         async with self.transaction() as connection:
+            lock_clause = "FOR UPDATE SKIP LOCKED" if self.backend_name == "mysql" else ""
+            token_column = "fencing_token" if self.backend_name == "mysql" else "0"
             cursor = await connection.execute(
-                """
-                SELECT id, run_id, requested_url, depth, attempts, page_type_hint
+                f"""
+                SELECT id, run_id, requested_url, depth, attempts, page_type_hint,
+                       {token_column} AS fencing_token
                 FROM crawl_queue
                 WHERE run_id = ? AND status = 'pending'
                   AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
                   AND (? = 0 OR depth <= ?)
                 ORDER BY priority DESC, id ASC
                 LIMIT 1
-                """,
+                {lock_clause}
+                """,  # noqa: S608 - fragments are selected from fixed values.
                 (run_id, now, max_depth, max_depth),
             )
             row = await cursor.fetchone()
             if row is None:
                 return None
-            await connection.execute(
-                """
-                UPDATE crawl_queue
-                SET status = 'in_progress', attempts = attempts + 1,
-                    worker_id = ?, lease_expires_at = ?, started_at = COALESCE(started_at, ?)
-                WHERE id = ?
-                """,
-                (worker_id, lease, now, row["id"]),
-            )
+            if self.backend_name == "mysql":
+                await connection.execute(
+                    """
+                    UPDATE crawl_queue
+                    SET status = 'in_progress', attempts = attempts + 1,
+                        worker_id = ?, fencing_token = fencing_token + 1,
+                        lease_expires_at = DATE_ADD(
+                            UTC_TIMESTAMP(6), INTERVAL ? SECOND
+                        ),
+                        started_at = COALESCE(started_at, UTC_TIMESTAMP(6))
+                    WHERE id = ? AND status = 'pending'
+                    """,
+                    (worker_id, lease_seconds, row["id"]),
+                )
+                token_cursor = await connection.execute(
+                    "SELECT fencing_token FROM crawl_queue WHERE id = ?",
+                    (row["id"],),
+                )
+                token_row = await token_cursor.fetchone()
+                if token_row is None:
+                    raise RuntimeError("claimed queue item disappeared")
+                fencing_token: int | None = int(token_row["fencing_token"])
+            else:
+                await connection.execute(
+                    """
+                    UPDATE crawl_queue
+                    SET status = 'in_progress', attempts = attempts + 1,
+                        worker_id = ?, lease_expires_at = ?,
+                        started_at = COALESCE(started_at, ?)
+                    WHERE id = ?
+                    """,
+                    (worker_id, lease, now, row["id"]),
+                )
+                fencing_token = None
         return QueueItem(
             id=int(row["id"]),
             run_id=int(row["run_id"]),
@@ -237,6 +319,8 @@ class Repository:
             depth=int(row["depth"]),
             attempts=int(row["attempts"]) + 1,
             page_type_hint=row["page_type_hint"],
+            worker_id=worker_id,
+            fencing_token=fencing_token,
         )
 
     async def release_in_progress(self, run_id: int, worker_id: str) -> int:
@@ -251,6 +335,31 @@ class Repository:
             )
         return cursor.rowcount
 
+    async def renew_queue_lease(
+        self,
+        queue_id: int,
+        *,
+        worker_id: str,
+        fencing_token: int | None,
+        lease_seconds: int,
+    ) -> None:
+        if self.backend_name != "mysql" or fencing_token is None:
+            return
+        async with self.transaction() as connection:
+            cursor = await connection.execute(
+                """
+                UPDATE crawl_queue
+                SET lease_expires_at = DATE_ADD(
+                    UTC_TIMESTAMP(6), INTERVAL ? SECOND
+                )
+                WHERE id = ? AND status = 'in_progress'
+                  AND worker_id = ? AND fencing_token = ?
+                """,
+                (lease_seconds, queue_id, worker_id, fencing_token),
+            )
+        if cursor.rowcount != 1:
+            raise LeaseLostError(f"queue lease lost before renewal: {queue_id}")
+
     async def store_response(
         self,
         run_id: int,
@@ -259,6 +368,8 @@ class Repository:
         *,
         challenged: bool,
         challenge_reason: str | None,
+        worker_id: str | None = None,
+        fencing_token: int | None = None,
     ) -> tuple[int, str]:
         sha256 = hashlib.sha256(result.body).hexdigest()
         compressed = zlib.compress(result.body, level=6)
@@ -277,40 +388,85 @@ class Repository:
                 """,
                 (sha256, compressed, len(result.body), len(compressed), now),
             )
-            cursor = await connection.execute(
-                """
-                INSERT INTO http_responses(
-                    run_id, queue_id, requested_url, final_url, redirect_chain_json,
-                    http_status, response_headers_json, content_type, charset,
-                    body_sha256, response_bytes, elapsed_ms, attempt,
-                    is_cloudflare_challenge, challenge_reason, fetched_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    run_id,
-                    queue_id,
-                    result.requested_url,
-                    result.final_url,
-                    json.dumps(result.redirect_chain),
-                    result.status,
-                    json.dumps(safe_headers, sort_keys=True),
-                    result.content_type,
-                    result.charset,
-                    sha256,
-                    len(result.body),
-                    result.elapsed_ms,
-                    result.attempt,
-                    challenged,
-                    challenge_reason,
-                    now,
-                ),
-            )
+            if self.backend_name == "mysql":
+                cursor = await connection.execute(
+                    """
+                    INSERT INTO http_responses(
+                        run_id, queue_id, queue_fencing_token, requested_url,
+                        requested_url_hash, final_url, redirect_chain_json,
+                        http_status, response_headers_json, content_type, charset,
+                        body_sha256, response_bytes, elapsed_ms, attempt,
+                        is_cloudflare_challenge, challenge_reason, fetched_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        queue_id,
+                        fencing_token,
+                        result.requested_url,
+                        hashlib.sha256(result.requested_url.encode()).hexdigest(),
+                        result.final_url,
+                        json.dumps(result.redirect_chain),
+                        result.status,
+                        json.dumps(safe_headers, sort_keys=True),
+                        result.content_type,
+                        result.charset,
+                        sha256,
+                        len(result.body),
+                        result.elapsed_ms,
+                        result.attempt,
+                        challenged,
+                        challenge_reason,
+                        now,
+                    ),
+                )
+            else:
+                cursor = await connection.execute(
+                    """
+                    INSERT INTO http_responses(
+                        run_id, queue_id, requested_url, final_url, redirect_chain_json,
+                        http_status, response_headers_json, content_type, charset,
+                        body_sha256, response_bytes, elapsed_ms, attempt,
+                        is_cloudflare_challenge, challenge_reason, fetched_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        queue_id,
+                        result.requested_url,
+                        result.final_url,
+                        json.dumps(result.redirect_chain),
+                        result.status,
+                        json.dumps(safe_headers, sort_keys=True),
+                        result.content_type,
+                        result.charset,
+                        sha256,
+                        len(result.body),
+                        result.elapsed_ms,
+                        result.attempt,
+                        challenged,
+                        challenge_reason,
+                        now,
+                    ),
+                )
             response_id = int(cursor.lastrowid or 0)
             if queue_id is not None:
-                await connection.execute(
-                    "UPDATE crawl_queue SET response_id = ? WHERE id = ?",
-                    (response_id, queue_id),
-                )
+                if self.backend_name == "mysql" and fencing_token is not None:
+                    linked = await connection.execute(
+                        """
+                        UPDATE crawl_queue SET response_id = ?
+                        WHERE id = ? AND status = 'in_progress'
+                          AND worker_id = ? AND fencing_token = ?
+                        """,
+                        (response_id, queue_id, worker_id, fencing_token),
+                    )
+                    if linked.rowcount != 1:
+                        raise LeaseLostError(f"queue lease lost before response link: {queue_id}")
+                else:
+                    await connection.execute(
+                        "UPDATE crawl_queue SET response_id = ? WHERE id = ?",
+                        (response_id, queue_id),
+                    )
         return response_id, sha256
 
     async def finish_queue(
@@ -320,22 +476,48 @@ class Repository:
         *,
         error: str | None = None,
         next_attempt_at: str | None = None,
+        worker_id: str | None = None,
+        fencing_token: int | None = None,
     ) -> None:
         if status not in QUEUE_STATUSES:
             raise ValueError(f"invalid queue status: {status}")
         terminal = status not in {"pending", "in_progress"}
         now = utc_now()
         async with self.transaction() as connection:
-            await connection.execute(
-                """
-                UPDATE crawl_queue
-                SET status = ?, last_error = ?, next_attempt_at = ?,
-                    worker_id = NULL, lease_expires_at = NULL,
-                    finished_at = CASE WHEN ? THEN ? ELSE finished_at END
-                WHERE id = ?
-                """,
-                (status, error, next_attempt_at, terminal, now, queue_id),
-            )
+            if self.backend_name == "mysql" and fencing_token is not None:
+                cursor = await connection.execute(
+                    """
+                    UPDATE crawl_queue
+                    SET status = ?, last_error = ?, next_attempt_at = ?,
+                        worker_id = NULL, lease_expires_at = NULL,
+                        finished_at = CASE WHEN ? THEN ? ELSE finished_at END
+                    WHERE id = ? AND status = 'in_progress'
+                      AND worker_id = ? AND fencing_token = ?
+                    """,
+                    (
+                        status,
+                        error,
+                        next_attempt_at,
+                        terminal,
+                        now,
+                        queue_id,
+                        worker_id,
+                        fencing_token,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise LeaseLostError(f"queue lease lost before finalize: {queue_id}")
+            else:
+                await connection.execute(
+                    """
+                    UPDATE crawl_queue
+                    SET status = ?, last_error = ?, next_attempt_at = ?,
+                        worker_id = NULL, lease_expires_at = NULL,
+                        finished_at = CASE WHEN ? THEN ? ELSE finished_at END
+                    WHERE id = ?
+                    """,
+                    (status, error, next_attempt_at, terminal, now, queue_id),
+                )
 
     async def add_archive_capture(
         self,
@@ -351,29 +533,390 @@ class Repository:
         truncation_reason: str | None = None,
         metadata: dict[str, object] | None = None,
     ) -> None:
+        capture_key = self._archive_capture_key(
+            archive_source=archive_source,
+            collection_name=collection_name,
+            warc_filename=warc_filename,
+            warc_offset=warc_offset,
+            warc_length=warc_length,
+            response_id=response_id,
+            captured_at=captured_at,
+            archive_digest=archive_digest,
+        )
+        async with self.transaction() as connection:
+            if self.backend_name == "mysql":
+                await connection.execute(
+                    """
+                    INSERT IGNORE INTO archive_captures(
+                        response_id, capture_key_sha256, archive_source,
+                        collection_name, captured_at, warc_filename, warc_offset,
+                        warc_length, archive_digest, truncation_reason,
+                        metadata_json, imported_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        response_id,
+                        capture_key,
+                        archive_source,
+                        collection_name,
+                        captured_at,
+                        warc_filename,
+                        warc_offset,
+                        warc_length,
+                        archive_digest,
+                        truncation_reason,
+                        json.dumps(metadata or {}, sort_keys=True),
+                        utc_now(),
+                    ),
+                )
+            else:
+                await connection.execute(
+                    """
+                    INSERT INTO archive_captures(
+                        response_id, archive_source, collection_name, captured_at,
+                        warc_filename, warc_offset, warc_length, archive_digest,
+                        truncation_reason, metadata_json, imported_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        response_id,
+                        archive_source,
+                        collection_name,
+                        captured_at,
+                        warc_filename,
+                        warc_offset,
+                        warc_length,
+                        archive_digest,
+                        truncation_reason,
+                        json.dumps(metadata or {}, sort_keys=True),
+                        utc_now(),
+                    ),
+                )
+
+    async def import_archive_capture_raw(
+        self,
+        *,
+        run_id: int,
+        result: FetchResult,
+        expected_body_sha256: str,
+        challenged: bool,
+        challenge_reason: str | None,
+        fetched_at: str,
+        content_type: str | None,
+        charset: str | None,
+        archive_source: str,
+        collection_name: str | None,
+        captured_at: str,
+        warc_filename: str | None,
+        warc_offset: int | None,
+        warc_length: int | None,
+        archive_digest: str | None,
+        truncation_reason: str | None,
+        archive_imported_at: str,
+        metadata: dict[str, object],
+        capture_key: str,
+        source_snapshot_sha256: str | None,
+        source_capture_id: int | None,
+    ) -> ArchiveCaptureImportResult:
+        if self.backend_name != "mysql":
+            raise RuntimeError("archive snapshot migration requires the MySQL backend")
+
+        body_sha256 = hashlib.sha256(result.body).hexdigest()
+        if body_sha256 != expected_body_sha256:
+            raise ValueError(
+                f"archive body hash mismatch: expected {expected_body_sha256}, got {body_sha256}"
+            )
+
+        compressed = zlib.compress(result.body, level=6)
+        stored_fetched_at = _mysql_datetime(fetched_at)
+        stored_captured_at = _mysql_datetime(captured_at)
+        stored_imported_at = _mysql_datetime(archive_imported_at)
+        safe_headers = {
+            key: "[redacted]" if key.lower() == "set-cookie" else value
+            for key, value in result.headers.items()
+        }
         async with self.transaction() as connection:
             await connection.execute(
                 """
-                INSERT INTO archive_captures(
-                    response_id, archive_source, collection_name, captured_at,
-                    warc_filename, warc_offset, warc_length, archive_digest,
-                    truncation_reason, metadata_json, imported_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT OR IGNORE INTO response_bodies(
+                    sha256, compression, body_blob, original_bytes,
+                    stored_bytes, created_at
+                ) VALUES (?, 'zlib', ?, ?, ?, ?)
+                """,
+                (
+                    body_sha256,
+                    compressed,
+                    len(result.body),
+                    len(compressed),
+                    stored_imported_at,
+                ),
+            )
+            response_cursor = await connection.execute(
+                """
+                INSERT IGNORE INTO http_responses(
+                    run_id, queue_id, queue_fencing_token, requested_url,
+                    requested_url_hash, final_url, redirect_chain_json,
+                    http_status, response_headers_json, content_type, charset,
+                    body_sha256, response_bytes, elapsed_ms, attempt,
+                    is_cloudflare_challenge, challenge_reason,
+                    import_key_sha256, fetched_at
+                ) VALUES (?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    result.requested_url,
+                    hashlib.sha256(result.requested_url.encode()).hexdigest(),
+                    result.final_url,
+                    json.dumps(result.redirect_chain),
+                    result.status,
+                    json.dumps(safe_headers, sort_keys=True),
+                    content_type,
+                    charset,
+                    body_sha256,
+                    len(result.body),
+                    result.elapsed_ms,
+                    result.attempt,
+                    challenged,
+                    challenge_reason,
+                    capture_key,
+                    stored_fetched_at,
+                ),
+            )
+            created = response_cursor.rowcount == 1
+            stored_cursor = await connection.execute(
+                """
+                SELECT id, body_sha256 FROM http_responses
+                WHERE import_key_sha256 = ?
+                """,
+                (capture_key,),
+            )
+            stored = await stored_cursor.fetchone()
+            if stored is None:
+                raise RuntimeError("archive HTTP response was not persisted")
+            if str(stored["body_sha256"]) != body_sha256:
+                raise RuntimeError("archive capture key already points to another body")
+            response_id = int(stored["id"])
+
+            await connection.execute(
+                """
+                INSERT IGNORE INTO archive_captures(
+                    response_id, capture_key_sha256, archive_source,
+                    collection_name, captured_at, warc_filename, warc_offset,
+                    warc_length, archive_digest, truncation_reason, metadata_json,
+                    source_snapshot_sha256, source_capture_id, imported_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     response_id,
+                    capture_key,
                     archive_source,
                     collection_name,
-                    captured_at,
+                    stored_captured_at,
                     warc_filename,
                     warc_offset,
                     warc_length,
                     archive_digest,
                     truncation_reason,
-                    json.dumps(metadata or {}, sort_keys=True),
-                    utc_now(),
+                    json.dumps(metadata, sort_keys=True),
+                    source_snapshot_sha256,
+                    source_capture_id,
+                    stored_imported_at,
                 ),
             )
+
+        return ArchiveCaptureImportResult(
+            response_id=response_id,
+            body_sha256=body_sha256,
+            created=created,
+        )
+
+    async def create_or_get_sqlite_import_manifest(
+        self,
+        *,
+        source_snapshot_sha256: str,
+        source_schema_version: int | None,
+        source_bytes: int,
+        source_counts: Mapping[str, int],
+    ) -> Mapping[str, object]:
+        if self.backend_name != "mysql":
+            raise RuntimeError("SQLite archive manifest requires the MySQL backend")
+        now = utc_now()
+        async with self.transaction() as connection:
+            insert = await connection.execute(
+                """
+                INSERT IGNORE INTO sqlite_imports(
+                    source_snapshot_sha256, source_schema_version, source_bytes,
+                    status, last_archive_capture_id, source_counts_json,
+                    target_counts_json, error_message, started_at, updated_at, ended_at
+                ) VALUES (?, ?, ?, 'running', 0, ?, ?, NULL, ?, ?, NULL)
+                """,
+                (
+                    source_snapshot_sha256,
+                    source_schema_version,
+                    source_bytes,
+                    json.dumps(dict(source_counts), sort_keys=True),
+                    json.dumps({}, sort_keys=True),
+                    now,
+                    now,
+                ),
+            )
+            cursor = await connection.execute(
+                """
+                SELECT id, status, last_archive_capture_id
+                FROM sqlite_imports
+                WHERE source_snapshot_sha256 = ?
+                FOR UPDATE
+                """,
+                (source_snapshot_sha256,),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                raise RuntimeError("SQLite archive import manifest was not persisted")
+            previous_status = str(row["status"])
+            last_capture_id = int(row["last_archive_capture_id"])
+            resume_after = (
+                last_capture_id
+                if insert.rowcount == 0
+                and previous_status not in {"completed", "completed_with_gaps"}
+                else 0
+            )
+            await connection.execute(
+                """
+                UPDATE sqlite_imports
+                SET source_schema_version = ?, source_bytes = ?, status = 'running',
+                    source_counts_json = ?, target_counts_json = ?, error_message = NULL,
+                    updated_at = ?, ended_at = NULL
+                WHERE id = ?
+                """,
+                (
+                    source_schema_version,
+                    source_bytes,
+                    json.dumps(dict(source_counts), sort_keys=True),
+                    json.dumps({}, sort_keys=True),
+                    now,
+                    row["id"],
+                ),
+            )
+        return {
+            "id": int(row["id"]),
+            "previous_status": previous_status,
+            "resume_after_capture_id": resume_after,
+        }
+
+    async def record_sqlite_import_item(
+        self,
+        *,
+        import_id: int,
+        source_capture_id: int,
+        source_response_id: int,
+        body_sha256: str,
+        target_response_id: int | None,
+        status: str,
+        error_message: str | None,
+    ) -> None:
+        if self.backend_name != "mysql":
+            raise RuntimeError("SQLite archive manifest requires the MySQL backend")
+        if status not in {"imported", "skipped", "quarantined"}:
+            raise ValueError(f"invalid SQLite archive item status: {status}")
+        now = utc_now()
+        async with self.transaction() as connection:
+            await connection.execute(
+                """
+                INSERT INTO sqlite_import_items(
+                    import_id, source_capture_id, source_response_id, body_sha256,
+                    target_response_id, status, error_message, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON DUPLICATE KEY UPDATE
+                    source_response_id = ?, body_sha256 = ?, target_response_id = ?,
+                    status = ?, error_message = ?, updated_at = ?
+                """,
+                (
+                    import_id,
+                    source_capture_id,
+                    source_response_id,
+                    body_sha256,
+                    target_response_id,
+                    status,
+                    error_message,
+                    now,
+                    source_response_id,
+                    body_sha256,
+                    target_response_id,
+                    status,
+                    error_message,
+                    now,
+                ),
+            )
+            await connection.execute(
+                """
+                UPDATE sqlite_imports
+                SET last_archive_capture_id = GREATEST(last_archive_capture_id, ?),
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (source_capture_id, now, import_id),
+            )
+
+    async def finish_sqlite_import_manifest(
+        self,
+        import_id: int,
+        *,
+        status: str,
+        target_counts: Mapping[str, int],
+        error_message: str | None = None,
+    ) -> None:
+        if self.backend_name != "mysql":
+            raise RuntimeError("SQLite archive manifest requires the MySQL backend")
+        if status not in {"completed", "completed_with_gaps", "failed"}:
+            raise ValueError(f"invalid SQLite archive manifest status: {status}")
+        now = utc_now()
+        async with self.transaction() as connection:
+            cursor = await connection.execute(
+                """
+                UPDATE sqlite_imports
+                SET status = ?, target_counts_json = ?, error_message = ?,
+                    updated_at = ?, ended_at = ?
+                WHERE id = ?
+                """,
+                (
+                    status,
+                    json.dumps(dict(target_counts), sort_keys=True),
+                    error_message,
+                    now,
+                    now,
+                    import_id,
+                ),
+            )
+        if cursor.rowcount != 1:
+            raise RuntimeError(f"SQLite archive import manifest not found: {import_id}")
+
+    @staticmethod
+    def _archive_capture_key(
+        *,
+        archive_source: str,
+        collection_name: str | None,
+        warc_filename: str | None,
+        warc_offset: int | None,
+        warc_length: int | None,
+        response_id: int,
+        captured_at: str,
+        archive_digest: str | None,
+    ) -> str:
+        identity: dict[str, object] = {
+            "archive_source": archive_source,
+            "collection_name": collection_name,
+            "warc_filename": warc_filename,
+            "warc_offset": warc_offset,
+            "warc_length": warc_length,
+        }
+        if not warc_filename:
+            identity.update(
+                response_id=response_id,
+                captured_at=captured_at,
+                archive_digest=archive_digest,
+            )
+        encoded = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode()).hexdigest()
 
     async def archive_capture_exists(
         self,
@@ -400,6 +943,229 @@ class Repository:
             ),
         )
         return await cursor.fetchone() is not None
+
+    async def response_id_for_archive_capture(self, capture_key: str) -> int | None:
+        if self.backend_name != "mysql":
+            return None
+        cursor = await self.connection.execute(
+            "SELECT response_id FROM archive_captures WHERE capture_key_sha256 = ?",
+            (capture_key,),
+        )
+        row = await cursor.fetchone()
+        return int(row["response_id"]) if row is not None else None
+
+    async def create_or_get_archive_import_manifest(
+        self,
+        *,
+        run_id: int,
+        archive_source: str,
+        manifest_key: str,
+        metadata: Mapping[str, object],
+    ) -> int:
+        now = utc_now()
+        metadata_json = json.dumps(dict(metadata), sort_keys=True)
+        async with self.transaction() as connection:
+            await connection.execute(
+                """
+                INSERT OR IGNORE INTO archive_import_manifests(
+                    run_id, archive_source, manifest_key, metadata_json,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    archive_source,
+                    manifest_key,
+                    metadata_json,
+                    now,
+                    now,
+                ),
+            )
+            cursor = await connection.execute(
+                """
+                SELECT id FROM archive_import_manifests
+                WHERE run_id = ? AND archive_source = ? AND manifest_key = ?
+                """,
+                (run_id, archive_source, manifest_key),
+            )
+            row = await cursor.fetchone()
+            if row is not None:
+                await connection.execute(
+                    """
+                    UPDATE archive_import_manifests
+                    SET metadata_json = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (metadata_json, now, row["id"]),
+                )
+        if row is None:
+            raise RuntimeError("failed to create archive import manifest")
+        return int(row["id"])
+
+    async def enqueue_archive_import_items(
+        self,
+        manifest_id: int,
+        items: Sequence[Mapping[str, object]],
+    ) -> int:
+        if not items:
+            return 0
+        now = utc_now()
+        values = [
+            (
+                manifest_id,
+                str(item["capture_key"]),
+                str(item["source_url"]),
+                str(item.get("collection_name") or ""),
+                str(item.get("warc_filename") or ""),
+                int(cast(int, item.get("warc_offset") or 0)),
+                int(cast(int, item.get("warc_length") or 0)),
+                str(item.get("index_timestamp") or ""),
+                str(item.get("index_digest") or ""),
+                now,
+                now,
+            )
+            for item in items
+        ]
+        inserted = 0
+        async with self.transaction() as connection:
+            for start in range(0, len(values), 500):
+                cursor = await connection.executemany(
+                    """
+                    INSERT OR IGNORE INTO archive_import_items(
+                        manifest_id, capture_key, source_url, collection_name,
+                        warc_filename, warc_offset, warc_length, index_timestamp,
+                        index_digest, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    values[start : start + 500],
+                )
+                inserted += max(int(cursor.rowcount), 0)
+        return inserted
+
+    async def prepare_archive_import_resume(self, manifest_id: int) -> int:
+        now = utc_now()
+        async with self.transaction() as connection:
+            if self.backend_name == "mysql":
+                cursor = await connection.execute(
+                    """
+                    UPDATE archive_import_items
+                    SET status = 'pending', worker_id = NULL,
+                        lease_expires_at = NULL, finished_at = NULL,
+                        updated_at = UTC_TIMESTAMP(6)
+                    WHERE manifest_id = ? AND (
+                        status = 'failed'
+                        OR (status = 'in_progress' AND lease_expires_at < UTC_TIMESTAMP(6))
+                    )
+                    """,
+                    (manifest_id,),
+                )
+            else:
+                cursor = await connection.execute(
+                    """
+                    UPDATE archive_import_items
+                    SET status = 'pending', worker_id = NULL,
+                        lease_expires_at = NULL, finished_at = NULL, updated_at = ?
+                    WHERE manifest_id = ? AND (
+                        status = 'failed'
+                        OR (status = 'in_progress' AND lease_expires_at < ?)
+                    )
+                    """,
+                    (now, manifest_id, now),
+                )
+        return max(int(cursor.rowcount), 0)
+
+    async def claim_archive_import_item(
+        self,
+        manifest_id: int,
+        *,
+        worker_id: str,
+        lease_seconds: int,
+    ) -> Mapping[str, object] | None:
+        now = utc_now()
+        lease = (datetime.now(UTC) + timedelta(seconds=lease_seconds)).isoformat()
+        async with self.transaction() as connection:
+            lock_clause = "FOR UPDATE SKIP LOCKED" if self.backend_name == "mysql" else ""
+            cursor = await connection.execute(
+                f"""
+                SELECT * FROM archive_import_items
+                WHERE manifest_id = ? AND status = 'pending'
+                ORDER BY id
+                LIMIT 1
+                {lock_clause}
+                """,  # noqa: S608 - lock clause is selected from a fixed value.
+                (manifest_id,),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                return None
+            if self.backend_name == "mysql":
+                await connection.execute(
+                    """
+                    UPDATE archive_import_items
+                    SET status = 'in_progress', attempts = attempts + 1,
+                        worker_id = ?, fencing_token = fencing_token + 1,
+                        lease_expires_at = DATE_ADD(
+                            UTC_TIMESTAMP(6), INTERVAL ? SECOND
+                        ), updated_at = UTC_TIMESTAMP(6)
+                    WHERE id = ? AND status = 'pending'
+                    """,
+                    (worker_id, lease_seconds, row["id"]),
+                )
+            else:
+                await connection.execute(
+                    """
+                    UPDATE archive_import_items
+                    SET status = 'in_progress', attempts = attempts + 1,
+                        worker_id = ?, fencing_token = fencing_token + 1,
+                        lease_expires_at = ?, updated_at = ?
+                    WHERE id = ? AND status = 'pending'
+                    """,
+                    (worker_id, lease, now, row["id"]),
+                )
+            claimed_cursor = await connection.execute(
+                "SELECT * FROM archive_import_items WHERE id = ?",
+                (row["id"],),
+            )
+            claimed = await claimed_cursor.fetchone()
+        return dict(claimed) if claimed is not None else None
+
+    async def finish_archive_import_item(
+        self,
+        item_id: int,
+        status: str,
+        *,
+        fencing_token: int,
+        response_id: int | None = None,
+        error: str | None = None,
+    ) -> None:
+        allowed = {"done", "challenged", "http_error", "parse_failed", "failed"}
+        if status not in allowed:
+            raise ValueError(f"invalid archive item status: {status}")
+        now = utc_now()
+        async with self.transaction() as connection:
+            cursor = await connection.execute(
+                """
+                UPDATE archive_import_items
+                SET status = ?, response_id = ?, last_error = ?, worker_id = NULL,
+                    lease_expires_at = NULL, finished_at = ?, updated_at = ?
+                WHERE id = ? AND status = 'in_progress' AND fencing_token = ?
+                """,
+                (status, response_id, error, now, now, item_id, fencing_token),
+            )
+        if cursor.rowcount != 1:
+            raise LeaseLostError(f"archive item lease lost before finalize: {item_id}")
+
+    async def archive_import_item_counts(self, manifest_id: int) -> dict[str, int]:
+        cursor = await self.connection.execute(
+            """
+            SELECT status, COUNT(*) AS count
+            FROM archive_import_items
+            WHERE manifest_id = ?
+            GROUP BY status
+            """,
+            (manifest_id,),
+        )
+        return {str(row["status"]): int(row["count"]) for row in await cursor.fetchall()}
 
     async def add_parse_failure(
         self,
@@ -428,7 +1194,9 @@ class Repository:
                 ),
             )
 
-    async def body_by_response(self, response_id: int) -> tuple[aiosqlite.Row, bytes] | None:
+    async def body_by_response(
+        self, response_id: int
+    ) -> tuple[DatabaseRow | aiosqlite.Row, bytes] | None:
         cursor = await self.connection.execute(
             """
             SELECT h.*, b.compression, b.body_blob
@@ -445,17 +1213,34 @@ class Repository:
 
     async def latest_response_for_url(
         self, run_id: int, requested_url: str
-    ) -> tuple[aiosqlite.Row, bytes] | None:
-        cursor = await self.connection.execute(
-            """
-            SELECT h.*, b.compression, b.body_blob
-            FROM http_responses h
-            JOIN response_bodies b ON b.sha256 = h.body_sha256
-            WHERE h.run_id = ? AND h.requested_url = ?
-            ORDER BY h.id DESC LIMIT 1
-            """,
-            (run_id, requested_url),
-        )
+    ) -> tuple[DatabaseRow | aiosqlite.Row, bytes] | None:
+        if self.backend_name == "mysql":
+            cursor = await self.connection.execute(
+                """
+                SELECT h.*, b.compression, b.body_blob
+                FROM http_responses h
+                JOIN response_bodies b ON b.sha256 = h.body_sha256
+                WHERE h.run_id = ? AND h.requested_url_hash = ?
+                  AND h.requested_url = ?
+                ORDER BY h.id DESC LIMIT 1
+                """,
+                (
+                    run_id,
+                    hashlib.sha256(requested_url.encode()).hexdigest(),
+                    requested_url,
+                ),
+            )
+        else:
+            cursor = await self.connection.execute(
+                """
+                SELECT h.*, b.compression, b.body_blob
+                FROM http_responses h
+                JOIN response_bodies b ON b.sha256 = h.body_sha256
+                WHERE h.run_id = ? AND h.requested_url = ?
+                ORDER BY h.id DESC LIMIT 1
+                """,
+                (run_id, requested_url),
+            )
         row = await cursor.fetchone()
         if row is None:
             return None
@@ -486,7 +1271,7 @@ class Repository:
         url: str | None = None,
         sha256: str | None = None,
         run_id: int | None = None,
-    ) -> list[aiosqlite.Row]:
+    ) -> list[DatabaseRow | aiosqlite.Row]:
         clauses: list[str] = []
         parameters: list[object] = []
         for column, value in (
@@ -512,7 +1297,7 @@ class Repository:
         return list(await cursor.fetchall())
 
     @staticmethod
-    def restore_body(row: aiosqlite.Row) -> bytes:
+    def restore_body(row: DatabaseRow | aiosqlite.Row) -> bytes:
         return Repository._restore_body(row["compression"], row["body_blob"])
 
     @staticmethod
@@ -605,7 +1390,7 @@ class Repository:
                     FROM record_sources source
                     JOIN http_responses response ON response.id = source.response_id
                     WHERE response.run_id = ?
-                )
+                ) AS normalized_records
                 """,
                 (run_id,),
             )
@@ -628,6 +1413,10 @@ class Repository:
         ]
         return {table: await self._scalar(f"SELECT COUNT(*) FROM {table}") for table in tables}
 
+    async def response_body_hashes(self) -> set[str]:
+        cursor = await self.connection.execute("SELECT sha256 FROM response_bodies")
+        return {str(row["sha256"]) for row in await cursor.fetchall()}
+
     async def missing_provenance_count(self) -> int:
         total = 0
         for record_type, table in NORMALIZED_TABLES:
@@ -644,6 +1433,45 @@ class Repository:
         return total
 
     async def foreign_key_violations(self) -> list[dict[str, object]]:
+        if self.backend_name == "mysql":
+            checks = {
+                "http_response_body": """
+                    SELECT COUNT(*) FROM http_responses h
+                    LEFT JOIN response_bodies b ON b.sha256 = h.body_sha256
+                    WHERE b.sha256 IS NULL
+                """,
+                "archive_response": """
+                    SELECT COUNT(*) FROM archive_captures a
+                    LEFT JOIN http_responses h ON h.id = a.response_id
+                    WHERE h.id IS NULL
+                """,
+                "record_source_response": """
+                    SELECT COUNT(*) FROM record_sources s
+                    LEFT JOIN http_responses h ON h.id = s.response_id
+                    WHERE h.id IS NULL
+                """,
+                "occurrence_relations": """
+                    SELECT COUNT(*) FROM part_occurrences o
+                    LEFT JOIN part_numbers p ON p.id = o.part_number_id
+                    LEFT JOIN diagrams d ON d.id = o.diagram_id
+                    LEFT JOIN vehicle_configurations v ON v.id = o.vehicle_configuration_id
+                    WHERE p.id IS NULL OR d.id IS NULL OR v.id IS NULL
+                """,
+                "fitment_relations": """
+                    SELECT COUNT(*) FROM fitments f
+                    LEFT JOIN part_occurrences o ON o.id = f.part_occurrence_id
+                    LEFT JOIN part_numbers p ON p.id = f.part_number_id
+                    LEFT JOIN diagrams d ON d.id = f.diagram_id
+                    LEFT JOIN vehicle_configurations v ON v.id = f.vehicle_configuration_id
+                    WHERE o.id IS NULL OR p.id IS NULL OR d.id IS NULL OR v.id IS NULL
+                """,
+            }
+            violations: list[dict[str, object]] = []
+            for relation, query in checks.items():
+                count = await self._scalar(query)
+                if count:
+                    violations.append({"relation": relation, "count": count})
+            return violations
         cursor = await self.connection.execute("PRAGMA foreign_key_check")
         return [dict(row) for row in await cursor.fetchall()]
 
@@ -651,17 +1479,34 @@ class Repository:
         body = await self.connection.execute(
             """
             SELECT COUNT(*) AS count,
-                   COALESCE(SUM(original_bytes), 0) AS raw,
-                   COALESCE(SUM(stored_bytes), 0) AS stored
+                   COALESCE(SUM(original_bytes), 0) AS raw_bytes_total,
+                   COALESCE(SUM(stored_bytes), 0) AS stored_bytes_total
             FROM response_bodies
             """
         )
         body_row = await body.fetchone()
-        raw = int(body_row["raw"] if body_row else 0)
-        stored = int(body_row["stored"] if body_row else 0)
+        raw = int(body_row["raw_bytes_total"] if body_row else 0)
+        stored = int(body_row["stored_bytes_total"] if body_row else 0)
+        if self.backend_name == "mysql":
+            mysql_statistics_bytes = await self._scalar(
+                """
+                SELECT COALESCE(SUM(data_length + index_length), 0)
+                FROM information_schema.TABLES
+                WHERE table_schema = DATABASE()
+                """
+            )
+            database_bytes = max(mysql_statistics_bytes, stored)
+            database_bytes_kind = "mysql_statistics_lower_bound"
+        else:
+            database_bytes = (
+                self.path.stat().st_size if self.path is not None and self.path.exists() else 0
+            )
+            database_bytes_kind = "sqlite_file_size"
         return {
-            "database": str(self.path),
-            "database_bytes": self.path.stat().st_size if self.path.exists() else 0,
+            "database": self.database_label,
+            "backend": self.backend_name,
+            "database_bytes": database_bytes,
+            "database_bytes_kind": database_bytes_kind,
             "tables": await self.table_counts(),
             "unique_body_count": int(body_row["count"] if body_row else 0),
             "raw_bytes": raw,
@@ -740,23 +1585,35 @@ class Repository:
         return cursor.rowcount
 
     async def backup(self, destination: Path) -> None:
+        if self.backend_name == "mysql":
+            raise ValueError("MySQL backup requires mysqldump; SQLite backup is not applicable")
         async with self._write_lock:
             await self.connection.execute("PRAGMA wal_checkpoint(PASSIVE)")
-            await backup_database(self.connection, destination)
+            await backup_database(cast(aiosqlite.Connection, self.connection), destination)
 
     async def publish_snapshot(self, destination: Path) -> dict[str, object]:
+        if self.backend_name == "mysql":
+            raise ValueError("MySQL does not publish SQLite snapshot files")
+        if self.path is None:
+            raise ValueError("live database path is unavailable")
         if await asyncio.to_thread(_paths_resolve_equal, self.path, destination):
             raise ValueError("snapshot output must differ from the live database")
 
         async with self._write_lock:
             await self.connection.execute("PRAGMA wal_checkpoint(PASSIVE)")
-            return await publish_snapshot(self.connection, destination)
+            return await publish_snapshot(cast(aiosqlite.Connection, self.connection), destination)
 
     async def checkpoint(self) -> None:
+        if self.backend_name == "mysql":
+            return
         async with self._write_lock:
             await self.connection.execute("PRAGMA wal_checkpoint(PASSIVE)")
 
     async def _scalar(self, query: str, parameters: Sequence[object] = ()) -> int:
         cursor = await self.connection.execute(query, parameters)
         row = await cursor.fetchone()
-        return int(row[0] if row else 0)
+        if row is None:
+            return 0
+        if isinstance(row, Mapping):
+            return int(next(iter(row.values())))
+        return int(row[0])

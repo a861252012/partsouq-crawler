@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}PartSouq 本機資料後台{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('admin.static', filename='admin.css') }}">
+</head>
+<body>
+  <header>
+    <a class="brand" href="{{ url_for('admin.dashboard') }}">PartSouq 本機資料後台</a>
+    <nav>
+      {% for key, item in entity_specs.items() %}
+        <a href="{{ url_for('admin.entity_list', entity_type=key) }}">{{ item.title }}</a>
+      {% endfor %}
+    </nav>
+  </header>
+  <main>
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% for category, message in messages %}
+        <div class="notice {{ category }}">{{ message }}</div>
+      {% endfor %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+  </main>
+  <footer>本頁 SQL 查詢數：{{ query_trace.count }}。來源表唯讀，人工異動保留版本與稽核紀錄。</footer>
+</body>
+</html>
