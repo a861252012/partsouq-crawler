@@ -20,6 +20,9 @@ class CrawlerConfig:
     robots_policy: str = "require"
     lease_seconds: int = 120
     log_json: bool = False
+    transport: str = "http"
+    browser_executable: Path | None = None
+    browser_headless: bool = False
 
     @classmethod
     def from_env(cls, **overrides: object) -> CrawlerConfig:
@@ -30,6 +33,10 @@ class CrawlerConfig:
             "request_timeout_seconds": float(os.getenv("PARTSOUQ_REQUEST_TIMEOUT_SECONDS", "30")),
             "max_retries": int(os.getenv("PARTSOUQ_MAX_RETRIES", "3")),
             "user_agent": os.getenv("PARTSOUQ_USER_AGENT", ""),
+            "transport": os.getenv("PARTSOUQ_TRANSPORT", "http"),
+            "browser_executable": os.getenv("PARTSOUQ_BROWSER_EXECUTABLE") or None,
+            "browser_headless": os.getenv("PARTSOUQ_BROWSER_HEADLESS", "0").lower()
+            in {"1", "true", "yes"},
         }
         values.update({key: value for key, value in overrides.items() if value is not None})
         config = cls(
@@ -44,6 +51,13 @@ class CrawlerConfig:
             robots_policy=str(values.get("robots_policy", "require")),
             lease_seconds=int(str(values.get("lease_seconds", 120))),
             log_json=bool(values.get("log_json", False)),
+            transport=str(values.get("transport", "http")),
+            browser_executable=(
+                Path(str(values["browser_executable"]))
+                if values.get("browser_executable")
+                else None
+            ),
+            browser_headless=bool(values.get("browser_headless", False)),
         )
         config.validate()
         return config
@@ -59,6 +73,10 @@ class CrawlerConfig:
             raise ValueError("max-pages and max-depth use 0 for unlimited")
         if self.robots_policy not in {"require", "ignore"}:
             raise ValueError("robots-policy must be require or ignore")
+        if self.transport not in {"http", "browser"}:
+            raise ValueError("transport must be http or browser")
+        if self.transport == "browser" and self.concurrency != 1:
+            raise ValueError("browser transport requires concurrency 1")
 
     def public_dict(self) -> dict[str, object]:
         return {
@@ -71,4 +89,9 @@ class CrawlerConfig:
             "max_depth": self.max_depth,
             "robots_policy": self.robots_policy,
             "lease_seconds": self.lease_seconds,
+            "transport": self.transport,
+            "browser_executable": (
+                str(self.browser_executable) if self.browser_executable else None
+            ),
+            "browser_headless": self.browser_headless,
         }

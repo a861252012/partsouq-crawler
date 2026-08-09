@@ -11,10 +11,11 @@ from lxml.etree import XMLSyntaxError
 from partsouq_crawler.config import CrawlerConfig
 from partsouq_crawler.crawl.challenge import detect_challenge
 from partsouq_crawler.crawl.discovery import is_in_scope, normalize_url
-from partsouq_crawler.crawl.fetcher import Fetcher, FetchError
+from partsouq_crawler.crawl.fetcher import FetchError
 from partsouq_crawler.crawl.retries import RETRYABLE_STATUS, retry_delay
 from partsouq_crawler.crawl.robots import RobotsRules, parse_robots
 from partsouq_crawler.crawl.sitemap import parse_sitemap
+from partsouq_crawler.crawl.transport import FetchTransport, create_fetch_transport
 from partsouq_crawler.db.repository import Repository
 from partsouq_crawler.logging import CrawlLogger
 from partsouq_crawler.models.crawl import FetchResult, QueueItem
@@ -57,13 +58,8 @@ class CrawlerEngine:
         await self.repository.recover_expired_leases(self.run_id)
         await self.repository.set_run_status(self.run_id, "running")
         self._install_signal_handlers()
-        user_agent = self.config.user_agent or "partsouq-crawler/0.1"
-
-        async with Fetcher(
-            user_agent=user_agent,
-            timeout_seconds=self.config.request_timeout_seconds,
-            delay_seconds=self.config.delay_seconds,
-        ) as fetcher:
+        async with create_fetch_transport(self.config) as fetcher:
+            user_agent = fetcher.user_agent
             if self.config.robots_policy == "require":
                 try:
                     self.robots = await self._ensure_robots(fetcher, user_agent)
@@ -103,7 +99,7 @@ class CrawlerEngine:
         await self.repository.refresh_run_counters(self.run_id)
         return await self._finalize()
 
-    async def _ensure_robots(self, fetcher: Fetcher, user_agent: str) -> RobotsRules:
+    async def _ensure_robots(self, fetcher: FetchTransport, user_agent: str) -> RobotsRules:
         parts = urlsplit(self.seed_url)
         robots_url = urlunsplit((parts.scheme, parts.netloc, "/robots.txt", "", ""))
         saved = await self.repository.latest_response_for_url(self.run_id, robots_url)
@@ -139,7 +135,7 @@ class CrawlerEngine:
         )
         return parse_robots(robots_url, result.body, result.charset or "utf-8")
 
-    async def _worker(self, fetcher: Fetcher, worker_id: str) -> None:
+    async def _worker(self, fetcher: FetchTransport, worker_id: str) -> None:
         while not self.stop_event.is_set():
             if not await self._reserve_page():
                 return
@@ -186,7 +182,7 @@ class CrawlerEngine:
         async with self._counter_lock:
             self.processed = max(0, self.processed - 1)
 
-    async def _process_item(self, fetcher: Fetcher, item: QueueItem) -> None:
+    async def _process_item(self, fetcher: FetchTransport, item: QueueItem) -> None:
         if self.robots and not self.robots.allows(
             self.config.user_agent or "*", item.requested_url
         ):

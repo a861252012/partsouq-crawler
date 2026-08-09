@@ -39,6 +39,36 @@ def test_config_from_env_and_validation(monkeypatch, tmp_path: Path) -> None:
         CrawlerConfig(max_pages=-1).validate()
     with pytest.raises(ValueError):
         CrawlerConfig(robots_policy="maybe").validate()
+    with pytest.raises(ValueError):
+        CrawlerConfig(transport="maybe").validate()
+    with pytest.raises(ValueError):
+        CrawlerConfig(transport="browser", concurrency=2).validate()
+
+
+def test_config_browser_transport_from_env(monkeypatch) -> None:
+    monkeypatch.setenv("PARTSOUQ_TRANSPORT", "browser")
+    monkeypatch.setenv("PARTSOUQ_BROWSER_EXECUTABLE", "/Applications/Test Browser")
+    monkeypatch.setenv("PARTSOUQ_BROWSER_HEADLESS", "true")
+    config = CrawlerConfig.from_env()
+    assert config.transport == "browser"
+    assert config.browser_executable == Path("/Applications/Test Browser")
+    assert config.browser_headless is True
+
+
+def test_cli_browser_transport_options() -> None:
+    args = build_parser().parse_args(
+        [
+            "probe",
+            "https://partsouq.com/en/catalog/genuine",
+            "--transport",
+            "browser",
+            "--browser-executable",
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        ]
+    )
+    assert args.transport == "browser"
+    assert args.browser_executable.name == "Brave Browser"
+    assert args.browser_headless is False
 
 
 def test_cli_database_commands_and_export_service(tmp_path: Path) -> None:

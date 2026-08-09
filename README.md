@@ -88,6 +88,22 @@ partsouq-crawler probe \
 
 Probe 每次只發一個正常 GET。response 會先寫進 DB。403 challenge 不會被解析成型錄資料。
 
+### 標準 Playwright／Brave transport
+
+若要讓一般 JavaScript 在真正瀏覽器網路堆疊中執行，可改用本機 Brave：
+
+```bash
+partsouq-crawler probe \
+  'https://partsouq.com/en/catalog/genuine' \
+  --sqlite output/partsouq-browser-live.sqlite3 \
+  --transport browser \
+  --browser-executable '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser'
+```
+
+Browser transport 預設為 headed、強制 `concurrency=1`，並使用全新的暫時 browser context。它不讀取既有 Brave profile，不匯入／匯出 cookie，也不包含 stealth、代理或 CAPTCHA solver。response 仍先寫入原本的 SQLite DB-first pipeline；一偵測到 challenge 就停止。
+
+2026-08-10 的實際驗證結果：Brave/Playwright 可讀到 `robots.txt` 200，但 Genuine Catalog 入口仍回傳 `HTTP 403` 與 `cf-mitigated: challenge`。Run 正確標為 `blocked`，正式型錄資料新增 0 筆。
+
 ## 全量執行與續爬
 
 設定具聯絡方式的固定 User-Agent：
@@ -110,6 +126,13 @@ partsouq-crawler crawl-all \
   --delay 5 \
   --robots-policy require \
   --user-agent "$PARTSOUQ_USER_AGENT"
+```
+
+改用 browser transport 時，附加：
+
+```bash
+--transport browser \
+--browser-executable '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser'
 ```
 
 `0` 代表 unlimited。中斷後用相同 `--run-id` 與 SQLite 路徑重跑即可；已完成 URL 不會重新 request，過期 lease 會恢復成 pending。

@@ -29,7 +29,7 @@
   <table>
     <thead><tr><th>管線</th><th>正式資料庫</th><th>已驗證結果</th><th>判定</th></tr></thead>
     <tbody>
-      <tr><td>PartSouq</td><td>SQLite <code>output/partsouq-live.sqlite3</code></td><td>1 筆 robots.txt 200、4 筆 Cloudflare 403、正式型錄資料 0 筆</td><td><code>blocked</code>，未完成型錄爬取</td></tr>
+      <tr><td>PartSouq</td><td>SQLite <code>output/partsouq-live.sqlite3</code>／<code>output/partsouq-browser-live.sqlite3</code></td><td>HTTP：1 筆 robots.txt 200、4 筆 challenge；Brave/Playwright：1 筆 robots.txt 200、2 筆 challenge；正式型錄資料 0 筆</td><td><code>blocked</code>，未完成型錄爬取</td></tr>
       <tr><td>NHTSA</td><td>MySQL <code>nhtsa</code></td><td>457 個 current artifacts、12 個 datasets、9,876,638 筆 current rows、current rejected 0</td><td>本文件所列範圍已完成</td></tr>
     </tbody>
   </table>
@@ -70,6 +70,16 @@
     <li>若站方政策允許，使用 headed Playwright 收集沒有 challenge 的一般 JS 頁；一遇 challenge 就停止，不嘗試規避。</li>
   </ol>
   <p>以上替代路徑都不能在現況下保證「自動全量取得 PartSouq 型錄」。</p>
+
+  <h3>已實作的 Browser transport 與 live 證據</h3>
+  <ul>
+    <li>CLI 已提供 <code>--transport browser</code>、<code>--browser-executable</code>、<code>--browser-headless</code>。</li>
+    <li>預設 headed，browser transport 固定 <code>concurrency=1</code>，沿用 host delay、robots、persistent queue、raw response、SHA-256、challenge detector 與 normalized ingest。</li>
+    <li>每次啟動都建立新的暫時 browser context；不使用既有 Brave profile，不搬運或保存 cookie。</li>
+    <li>2026-08-10 <code>probe</code> 實測 Genuine Catalog：<code>HTTP 403</code>、<code>cf-mitigated: challenge</code>、body SHA-256 <code>90a33cbb3c805578fbbd9609eef76ce1a43406c2b2eb647e708ec0c0fe4c1d96</code>、normalized 0。</li>
+    <li>2026-08-10 <code>crawl-all</code> 實測：<code>robots.txt</code> 200，接著 Genuine Catalog 403 challenge；run <code>partsouq-browser-crawl-20260810</code> 為 <code>blocked</code>，<code>cloudflare_challenge_response_count=1</code>、queue challenged 1、normalized 0。</li>
+    <li>Live DB 共保存 3 筆 browser responses、3 個 unique bodies、12,357 raw bytes；foreign key violations 0。</li>
+  </ul>
 
   <h2>3. NHTSA 需求與範圍</h2>
   <p>NHTSA 路徑只使用 MySQL，不使用 SQLite。所有官方 raw ZIP／CSV／JSON 先以 SHA-256 命名保存於 <code>output/nhtsa/raw</code>，再驗證、解析及寫入 MySQL。</p>
@@ -188,6 +198,16 @@ partsouq-crawler nhtsa-status
 partsouq-crawler crawl-status \
   --sqlite output/partsouq-live.sqlite3 \
   --run-id partsouq-genuine-full
+
+# PartSouq 標準 headed Brave／Playwright（fresh context）
+partsouq-crawler crawl-all \
+  --sqlite output/partsouq-browser-live.sqlite3 \
+  --run-id partsouq-browser-crawl-20260810 \
+  --seed-url 'https://partsouq.com/en/catalog/genuine' \
+  --max-pages 10 --max-depth 0 --concurrency 1 --delay 5 \
+  --retry-count 0 --robots-policy require \
+  --transport browser \
+  --browser-executable '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser'
 
 # 品質檢查
 python -m pytest

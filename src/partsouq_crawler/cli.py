@@ -13,9 +13,10 @@ import pymysql
 from partsouq_crawler.config import DEFAULT_SEED, CrawlerConfig
 from partsouq_crawler.crawl.challenge import detect_challenge
 from partsouq_crawler.crawl.engine import CrawlerEngine
-from partsouq_crawler.crawl.fetcher import Fetcher, FetchError
+from partsouq_crawler.crawl.fetcher import FetchError
 from partsouq_crawler.crawl.robots import parse_robots
 from partsouq_crawler.crawl.sitemap import parse_sitemap
+from partsouq_crawler.crawl.transport import create_fetch_transport
 from partsouq_crawler.db.repository import Repository
 from partsouq_crawler.logging import CrawlLogger
 from partsouq_crawler.nhtsa.api_service import NhtsaApiSyncService
@@ -39,6 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
     probe.add_argument("--run-id", default="partsouq-live-probe")
     probe.add_argument("--user-agent")
     probe.add_argument("--timeout", type=float, default=30.0)
+    _transport_arguments(probe)
 
     crawl = subparsers.add_parser("crawl-all", help="Resume or start full discovery crawl")
     _database_argument(crawl)
@@ -53,6 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     crawl.add_argument("--robots-policy", choices=("require", "ignore"), default="require")
     crawl.add_argument("--user-agent")
     crawl.add_argument("--json-log", action="store_true")
+    _transport_arguments(crawl)
 
     status = subparsers.add_parser("crawl-status")
     _database_argument(status)
@@ -132,6 +135,12 @@ def _database_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--sqlite", type=Path, default=Path("output/partsouq-live.sqlite3"))
 
 
+def _transport_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--transport", choices=("http", "browser"), default="http")
+    parser.add_argument("--browser-executable", type=Path)
+    parser.add_argument("--browser-headless", action="store_true")
+
+
 def _nhtsa_arguments(parser: argparse.ArgumentParser, *, include_runtime: bool = True) -> None:
     parser.add_argument("--mysql-host")
     parser.add_argument("--mysql-port", type=int)
@@ -164,6 +173,9 @@ async def dispatch(args: argparse.Namespace) -> int:
                 robots_policy=args.robots_policy,
                 user_agent=args.user_agent,
                 log_json=args.json_log,
+                transport=args.transport,
+                browser_executable=args.browser_executable,
+                browser_headless=args.browser_headless,
             )
             engine = CrawlerEngine(
                 repository=repository,
@@ -266,16 +278,14 @@ async def _probe(repository: Repository, args: argparse.Namespace) -> int:
         max_retries=0,
         user_agent=args.user_agent,
         delay_seconds=0,
+        transport=args.transport,
+        browser_executable=args.browser_executable,
+        browser_headless=args.browser_headless,
     )
     run_id = await repository.create_or_get_run(args.run_id, [args.url], config.public_dict())
     await repository.set_run_status(run_id, "running")
-    user_agent = config.user_agent or "partsouq-crawler/0.1"
     try:
-        async with Fetcher(
-            user_agent=user_agent,
-            timeout_seconds=config.request_timeout_seconds,
-            delay_seconds=0,
-        ) as fetcher:
+        async with create_fetch_transport(config, delay_seconds=0) as fetcher:
             result = await fetcher.fetch_once(args.url)
     except FetchError as error:
         await repository.set_run_status(run_id, "failed", ended=True)

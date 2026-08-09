@@ -498,13 +498,22 @@ class Repository:
         response_count = await self._scalar(
             "SELECT COUNT(*) FROM http_responses WHERE run_id = ?", (run_id,)
         )
+        challenge_response_count = await self._scalar(
+            """
+            SELECT COUNT(*) FROM http_responses
+            WHERE run_id = ? AND is_cloudflare_challenge = 1
+            """,
+            (run_id,),
+        )
         record_count = await self.normalized_count(run_id)
         provenance_missing = await self.missing_provenance_count()
         foreign_keys = await self.foreign_key_violations()
         checks = {
             "queue_exhausted": queue["pending"] == 0 and queue["in_progress"] == 0,
             "no_failed_pages": queue["failed"] == 0,
-            "no_cloudflare_challenges": queue["challenged"] == 0,
+            "no_cloudflare_challenges": (
+                queue["challenged"] == 0 and challenge_response_count == 0
+            ),
             "no_robots_skips": queue["skipped_robots"] == 0,
             "no_parse_failures": queue["parse_failed"] == 0,
             "provenance_complete": provenance_missing == 0,
@@ -517,6 +526,7 @@ class Repository:
             "blocked_reason": run["blocked_reason"],
             "queue": queue,
             "http_response_count": response_count,
+            "cloudflare_challenge_response_count": challenge_response_count,
             "normalized_record_count": record_count,
             "completion_checks": checks,
             "strict_complete": all(checks.values()) and run["status"] == "completed",

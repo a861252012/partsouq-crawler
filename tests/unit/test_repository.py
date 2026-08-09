@@ -87,6 +87,43 @@ def test_response_body_sha_dedupe_and_restore(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_status_report_counts_challenge_response_without_queue_item(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        repository = await Repository.create(tmp_path / "probe.sqlite3")
+        run_id = await repository.create_or_get_run("probe", [], {})
+        result = FetchResult(
+            requested_url="https://x/challenge",
+            final_url="https://x/challenge",
+            status=403,
+            headers={"cf-mitigated": "challenge", "Content-Type": "text/html"},
+            body=b"challenge",
+            elapsed_ms=1,
+            attempt=1,
+        )
+        await repository.store_response(
+            run_id,
+            None,
+            result,
+            challenged=True,
+            challenge_reason="cloudflare_challenge",
+        )
+        await repository.set_run_status(
+            run_id,
+            "blocked",
+            blocked_reason="cloudflare_challenge",
+            ended=True,
+        )
+
+        status = await repository.status_report("probe")
+
+        assert status["cloudflare_challenge_response_count"] == 1
+        assert status["completion_checks"]["no_cloudflare_challenges"] is False
+        assert status["strict_complete"] is False
+        await repository.close()
+
+    asyncio.run(scenario())
+
+
 def test_set_cookie_is_redacted(tmp_path: Path) -> None:
     async def scenario() -> None:
         repository = await Repository.create(tmp_path / "cookie.sqlite3")

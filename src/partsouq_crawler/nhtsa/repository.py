@@ -487,8 +487,10 @@ class NhtsaMySQLRepository:
         with self.connection.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT dataset_name, COUNT(*) AS row_count
-                FROM nhtsa_current_records GROUP BY dataset_name ORDER BY dataset_name
+                SELECT c.dataset_name, SUM(a.source_rows) AS row_count
+                FROM nhtsa_current_artifacts AS c
+                JOIN nhtsa_source_artifacts AS a ON a.id = c.artifact_id
+                GROUP BY c.dataset_name ORDER BY c.dataset_name
                 """
             )
             current_counts = {str(row["dataset_name"]): int(row["row_count"]) for row in cursor}

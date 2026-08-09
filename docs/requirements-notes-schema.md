@@ -8,7 +8,7 @@
 
 | 管線 | 正式資料庫 | 已驗證結果 | 判定 |
 |---|---|---:|---|
-| PartSouq | SQLite `output/partsouq-live.sqlite3` | 1 筆 robots.txt 200、4 筆 Cloudflare 403、正式型錄資料 0 筆 | `blocked`，未完成型錄爬取 |
+| PartSouq | SQLite `output/partsouq-live.sqlite3`／`output/partsouq-browser-live.sqlite3` | HTTP：1 筆 robots.txt 200、4 筆 challenge；Brave/Playwright：1 筆 robots.txt 200、2 筆 challenge；正式型錄資料 0 筆 | `blocked`，未完成型錄爬取 |
 | NHTSA | MySQL `nhtsa` | 457 個 current artifacts、12 個 datasets、9,876,638 筆 current rows、current rejected 0 | 本文件所列範圍已完成 |
 
 GitHub remote 固定為 `git@github.com:a861252012/partsouq-crawler.git`。發布前必須同時確認：
@@ -47,6 +47,15 @@ Playwright 與 Selenium 都是瀏覽器驅動層。兩者疊加不會讓同一�
 3. 若站方政策允許，使用 headed Playwright 收集沒有 challenge 的一般 JS 頁；一遇 challenge 就停止，不嘗試規避。
 
 以上替代路徑都不能在現況下保證「自動全量取得 PartSouq 型錄」。
+
+### 已實作的 Browser transport 與 live 證據
+
+- CLI 已提供 `--transport browser`、`--browser-executable`、`--browser-headless`。
+- 預設 headed，browser transport 固定 `concurrency=1`，沿用 host delay、robots、persistent queue、raw response、SHA-256、challenge detector 與 normalized ingest。
+- 每次啟動都建立新的暫時 browser context；不使用既有 Brave profile，不搬運或保存 cookie。
+- 2026-08-10 `probe` 實測 Genuine Catalog：`HTTP 403`、`cf-mitigated: challenge`、body SHA-256 `90a33cbb3c805578fbbd9609eef76ce1a43406c2b2eb647e708ec0c0fe4c1d96`、normalized 0。
+- 2026-08-10 `crawl-all` 實測：`robots.txt` 200，接著 Genuine Catalog 403 challenge；run `partsouq-browser-crawl-20260810` 為 `blocked`，`cloudflare_challenge_response_count=1`、queue challenged 1、normalized 0。
+- Live DB 共保存 3 筆 browser responses、3 個 unique bodies、12,357 raw bytes；foreign key violations 0。
 
 ## 3. NHTSA 需求與範圍
 
@@ -185,6 +194,16 @@ partsouq-crawler nhtsa-status
 partsouq-crawler crawl-status \
   --sqlite output/partsouq-live.sqlite3 \
   --run-id partsouq-genuine-full
+
+# PartSouq 標準 headed Brave／Playwright（fresh context）
+partsouq-crawler crawl-all \
+  --sqlite output/partsouq-browser-live.sqlite3 \
+  --run-id partsouq-browser-crawl-20260810 \
+  --seed-url 'https://partsouq.com/en/catalog/genuine' \
+  --max-pages 10 --max-depth 0 --concurrency 1 --delay 5 \
+  --retry-count 0 --robots-policy require \
+  --transport browser \
+  --browser-executable '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser'
 
 # 品質檢查
 python -m pytest
