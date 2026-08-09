@@ -1,5 +1,7 @@
 # Architecture
 
+PartSouq 與 NHTSA 共用 CLI package，但下載、資料庫與完成條件互相獨立。
+
 ## Data flow
 
 ```text
@@ -65,3 +67,39 @@ Queue 工作先取得有期限 lease。收到 response 後的提交順序固定�
 Crawler 的閉包是 seed、robots sitemap、nested sitemap 與已取得 HTML 公開連結所發現的 allowed URLs。它不枚舉 VIN/Frame、不登入，也不能證明網站中無連結的隱藏資料存在與否。
 
 `completed` 必須 queue 耗盡且沒有 failed/challenged/skipped_robots/parse_failed。任何 gap 都是 `completed_with_gaps`，外部阻斷則是 `blocked`。`crawl-status` 另外以 foreign keys 與 provenance 完整性計算 `strict_complete`。
+
+## NHTSA data flow
+
+```text
+NHTSA official bulk files / allowlisted API endpoints
+                         │
+                         ▼
+       content-addressed raw artifact on disk
+                         │
+                         ▼
+      ZIP + CRC + member + schema validation
+                         │
+               ┌─────────┴─────────┐
+               ▼                   ▼
+       parsed source rows     rejected rows
+               │                   │
+               ▼                   ▼
+      MySQL record versions    quarantined artifact
+               │
+               ▼
+        artifact/row lineage
+               │
+       all selected sources pass
+               │
+               ▼
+   atomic nhtsa_current_artifacts publish
+```
+
+NHTSA 設計邊界：
+
+- API client 只接受 `vpic.nhtsa.dot.gov` 與 `api.nhtsa.gov` 的明列 endpoint；VIN decode 與 VIN 枚舉不在 allowlist。
+- bulk 檔與 API JSON 都先保存 raw bytes，再解析及入庫。
+- parser schema 改變時以版本隔離；已 quarantined 的內容不會被靜默重用。
+- `nhtsa_record_versions` 保存歷史 payload；`nhtsa_current_artifacts` 只指向本次完整驗證的來源集合。
+- 同一官方 artifact 的重複列或不同更新日期會保留每個來源行號；不同 artifact 對同一 natural key 提供不同內容時會阻擋發佈。
+- 每一批資料各自 transaction，不用單一超大 transaction；範圍發佈本身保持原子性。

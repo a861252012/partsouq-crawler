@@ -1,0 +1,34 @@
+services:
+  mysql:
+    image: mysql:8.0.40
+    platform: linux/amd64
+    container_name: nhtsa-mysql
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --max-allowed-packet=64M
+      - --innodb-buffer-pool-size=6G
+      - --innodb-redo-log-capacity=4G
+      - --innodb-io-capacity=2000
+      - --innodb-io-capacity-max=10000
+      - --skip-log-bin
+    environment:
+      MYSQL_ROOT_PASSWORD: ${NHTSA_MYSQL_ROOT_PASSWORD:-nhtsa-local-root}
+      MYSQL_DATABASE: nhtsa
+      MYSQL_USER: nhtsa
+      MYSQL_PASSWORD: ${NHTSA_MYSQL_PASSWORD:-nhtsa-local}
+      TZ: Asia/Taipei
+    ports:
+      - "127.0.0.1:3308:3306"
+    volumes:
+      - nhtsa_mysql_data:/var/lib/mysql
+      - ./docker/mysql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -unhtsa -p$${MYSQL_PASSWORD} --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 5m
+
+volumes:
+  nhtsa_mysql_data:

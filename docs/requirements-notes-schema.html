@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PartSouq / NHTSA 同步需求、注意事項與資料庫 Schema</title>
+  <style>
+    :root { color-scheme: light dark; --accent: #0f766e; --muted: #64748b; --border: #94a3b8; }
+    body { font: 16px/1.65 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 1120px; margin: 0 auto; padding: 32px 24px 72px; }
+    h1, h2, h3 { line-height: 1.25; }
+    h1 { color: var(--accent); }
+    h2 { border-bottom: 1px solid var(--border); padding-bottom: .3rem; margin-top: 2.2rem; }
+    table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+    th, td { border: 1px solid var(--border); padding: .5rem .65rem; text-align: left; vertical-align: top; }
+    th { background: color-mix(in srgb, var(--accent) 13%, transparent); }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    pre { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; padding: 1rem; background: color-mix(in srgb, var(--muted) 9%, transparent); }
+    .status { border-left: 5px solid var(--accent); padding: .8rem 1rem; background: color-mix(in srgb, var(--accent) 8%, transparent); }
+    .warning { border-left-color: #dc2626; }
+    .muted { color: var(--muted); }
+  </style>
+</head>
+<body>
+  <h1>PartSouq / NHTSA 同步需求、注意事項與資料庫 Schema</h1>
+  <p class="muted">文件日期：2026-08-10（Asia/Taipei）</p>
+
+  <h2>1. 目標與目前結果</h2>
+  <p>本專案以 Python 實作兩條互相分離的資料管線。PartSouq 保存公開型錄頁的原始 HTTP response，再解析車輛、圖組、零件與適用關係；NHTSA 從官方 bulk files 與明列 API 取得 Vehicle Safety／vPIC 資料，直接寫入 MySQL。</p>
+  <table>
+    <thead><tr><th>管線</th><th>正式資料庫</th><th>已驗證結果</th><th>判定</th></tr></thead>
+    <tbody>
+      <tr><td>PartSouq</td><td>SQLite <code>output/partsouq-live.sqlite3</code></td><td>1 筆 robots.txt 200、4 筆 Cloudflare 403、正式型錄資料 0 筆</td><td><code>blocked</code>，未完成型錄爬取</td></tr>
+      <tr><td>NHTSA</td><td>MySQL <code>nhtsa</code></td><td>457 個 current artifacts、12 個 datasets、9,876,638 筆 current rows、current rejected 0</td><td>本文件所列範圍已完成</td></tr>
+    </tbody>
+  </table>
+  <p>GitHub remote 固定為 <code>git@github.com:a861252012/partsouq-crawler.git</code>。發布前必須同時確認：</p>
+  <ol>
+    <li><code>git remote -v</code> 的 owner 是 <code>a861252012</code>。</li>
+    <li><code>ssh -T git@github.com</code> 回覆 <code>Hi a861252012!</code>。</li>
+    <li>Brave 顯示目前 GitHub 帳號為 <code>a861252012</code>。</li>
+    <li>禁止使用 <code>Ted-Lin-Bibian</code>／Bibian 公司帳號、token 或 SSH key。</li>
+  </ol>
+
+  <h2>2. PartSouq 需求</h2>
+  <ul>
+    <li>從公開 Genuine Catalog seed、robots、sitemap 與已取得 HTML 連結持續發現 URL。</li>
+    <li>使用 SQLite persistent queue，支援 lease、斷點續爬、重試與終止狀態。</li>
+    <li>每次 response 必須先保存 status、headers、redirect chain、raw body、SHA-256 與時間，再分類或解析。</li>
+    <li>保留車輛、分類樹、diagram、料號、occurrence、verified fitment、compatibility hint 與 replacement 關係。</li>
+    <li>每筆 normalized record 必須可回查原始 response 與 parser version。</li>
+    <li>固定 User-Agent、低併發、每 host 延遲、遵守 robots；不得暴力重試 403。</li>
+    <li>Cloudflare challenge 必須保存為證據並停止 run；challenge HTML 不得當成型錄 HTML。</li>
+    <li>fixture、推測值或假資料不得計入 live 正式資料。</li>
+  </ul>
+
+  <h3>Playwright / Selenium 決策</h3>
+  <p>Playwright 與 Selenium 都是瀏覽器驅動層。兩者疊加不會讓同一個 session 更像真人，反而會產生兩套 lifecycle、cookie、等待與除錯模型。因此一條 collector 只應選一套；若網站只是一般 JavaScript render，優先選 Playwright。</p>
+  <p class="status warning">目前 PartSouq response 已明確是 Cloudflare challenge，不是單純「頁面需要執行 JavaScript」。</p>
+  <p>本專案不加入：</p>
+  <ul>
+    <li><code>pyppeteer-stealth</code>、<code>playwright-stealth</code> 或其他 fingerprint／Web API 偽裝。</li>
+    <li><code>undetected-*</code> driver、TLS fingerprint 模仿、代理輪替或住宅代理。</li>
+    <li>搬運、複製或注入 <code>cf_clearance</code>。</li>
+    <li>自動解 CAPTCHA，或以「模擬真人」為目的的滑鼠／鍵盤行為偽裝。</li>
+  </ul>
+  <p>在不使用付費第三方 API、目前也沒有 PartSouq 書面授權的條件下，可接受的替代路徑：</p>
+  <ol>
+    <li>使用者正常瀏覽後，匯入其有權保存的 HTML／HAR／下載檔，再走既有 DB-first parser。</li>
+    <li>取得合法持有的 OEM EPC／bulk export／供應商資料檔，新增離線 importer。</li>
+    <li>若站方政策允許，使用 headed Playwright 收集沒有 challenge 的一般 JS 頁；一遇 challenge 就停止，不嘗試規避。</li>
+  </ol>
+  <p>以上替代路徑都不能在現況下保證「自動全量取得 PartSouq 型錄」。</p>
+
+  <h2>3. NHTSA 需求與範圍</h2>
+  <p>NHTSA 路徑只使用 MySQL，不使用 SQLite。所有官方 raw ZIP／CSV／JSON 先以 SHA-256 命名保存於 <code>output/nhtsa/raw</code>，再驗證、解析及寫入 MySQL。</p>
+  <p>目前 datasets：</p>
+  <ul>
+    <li><code>safety_ratings</code>、<code>recalls</code>、<code>investigations</code>、<code>complaints</code></li>
+    <li><code>manufacturer_communications_summary</code>、<code>manufacturer_communications</code></li>
+    <li><code>cssi_stations</code></li>
+    <li><code>vpic_makes</code>、<code>vpic_models</code>、<code>vpic_manufacturers</code>、<code>vpic_variables</code>、<code>vpic_variable_values</code></li>
+  </ul>
+  <p>範圍依 NHTSA 官方 Vehicle Safety datasets、CSSI 與 vPIC 集合型 endpoints 建立。使用者提供的 2,087 行附件沒有 NHTSA、vPIC、Recall、Complaint 或 FARS 段落，因此本專案不宣稱涵蓋 NHTSA 全部研究資料；FARS 不在目前範圍。</p>
+  <ul>
+    <li>bulk 優先；API 只允許程式內明列的集合型 endpoint。</li>
+    <li>禁止 VIN 掃描、VIN 範圍列舉、任意 URL 與把 VIN decode API 當 bulk download。</li>
+    <li>驗證 HTTP、ZIP magic、CRC、member、欄位 schema 與逐列解析。</li>
+    <li>raw artifact、artifact member、record version、來源列號與 parser version 全部保留 provenance。</li>
+    <li>同一範圍只有全部來源 imported 且 rejected 為 0，才原子更新 current pointers。</li>
+    <li>失敗 artifact 保留為 <code>quarantined</code>，不得污染 current view。</li>
+    <li>Git 只提交程式、測試、Compose 與文件；禁止提交 raw artifacts、MySQL volume、<code>.env</code> 或資料匯出檔。</li>
+  </ul>
+
+  <h3>Current 資料快照</h3>
+  <table>
+    <thead><tr><th>Dataset</th><th>Current sources</th><th>Rows</th><th>Current rejected</th></tr></thead>
+    <tbody>
+      <tr><td>complaints</td><td>7</td><td>2,233,015</td><td>0</td></tr>
+      <tr><td>cssi_stations</td><td>56</td><td>3,278</td><td>0</td></tr>
+      <tr><td>investigations</td><td>1</td><td>154,249</td><td>0</td></tr>
+      <tr><td>manufacturer_communications</td><td>7</td><td>5,797,781</td><td>0</td></tr>
+      <tr><td>manufacturer_communications_summary</td><td>7</td><td>1,208,330</td><td>0</td></tr>
+      <tr><td>recalls</td><td>2</td><td>325,810</td><td>0</td></tr>
+      <tr><td>safety_ratings</td><td>1</td><td>17,313</td><td>0</td></tr>
+      <tr><td>vpic_makes</td><td>1</td><td>12,321</td><td>0</td></tr>
+      <tr><td>vpic_manufacturers</td><td>229</td><td>22,881</td><td>0</td></tr>
+      <tr><td>vpic_models</td><td>1</td><td>31,827</td><td>0</td></tr>
+      <tr><td>vpic_variable_values</td><td>144</td><td>69,689</td><td>0</td></tr>
+      <tr><td>vpic_variables</td><td>1</td><td>144</td><td>0</td></tr>
+      <tr><th>合計</th><th>457</th><th>9,876,638</th><th>0</th></tr>
+    </tbody>
+  </table>
+
+  <h2>4. PartSouq SQLite Schema</h2>
+  <p>權威 DDL：<code>src/partsouq_crawler/db/schema.sql</code></p>
+  <pre><code>crawl_runs 1 ── n crawl_queue 1 ── n http_responses n ── 1 response_bodies
+     │                 │                    │
+     └── discovery_edges                    ├── parse_failures
+                                            └── record_sources
+                                                   │
+vehicle_configurations 1 ── n taxonomy_nodes       │
+          │                       │                 │
+          ├── n diagrams ─────────┘                 │
+          │      │                                  │
+          │      └── n part_occurrences n ── 1 part_numbers
+          │                    │                    │
+          └──────────────── fitments ───────────────┘
+
+part_numbers 1 ── n compatibility_hints
+part_numbers 1 ── n part_relations</code></pre>
+  <table>
+    <thead><tr><th>Table</th><th>Key / 關聯</th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td><code>schema_migrations</code></td><td>PK <code>version</code></td><td>SQLite schema 版本</td></tr>
+      <tr><td><code>crawl_runs</code></td><td>PK <code>id</code>；UQ <code>run_key</code></td><td>run 設定、狀態、block reason、計數</td></tr>
+      <tr><td><code>crawl_queue</code></td><td>FK run；UQ run／URL hash</td><td>persistent queue、lease、attempt、terminal state</td></tr>
+      <tr><td><code>discovery_edges</code></td><td>FK run／response</td><td>URL 發現來源與方法</td></tr>
+      <tr><td><code>response_bodies</code></td><td>PK <code>sha256</code></td><td>zlib raw body，依內容去重</td></tr>
+      <tr><td><code>http_responses</code></td><td>FK run／queue／body</td><td>request／response、headers、status、challenge 證據</td></tr>
+      <tr><td><code>record_sources</code></td><td>FK response；record/parser unique</td><td>normalized record provenance</td></tr>
+      <tr><td><code>vehicle_configurations</code></td><td>natural-key unique</td><td>車輛、model、production period、catalog code</td></tr>
+      <tr><td><code>taxonomy_nodes</code></td><td>FK vehicle／self parent</td><td>任意深度分類樹</td></tr>
+      <tr><td><code>diagrams</code></td><td>FK vehicle／taxonomy</td><td>圖組與有效期間</td></tr>
+      <tr><td><code>part_numbers</code></td><td>UQ brand/raw/source；normalized index</td><td>原始／搜尋用料號</td></tr>
+      <tr><td><code>part_occurrences</code></td><td>FK part／diagram／vehicle</td><td>callout、數量、range、condition</td></tr>
+      <tr><td><code>fitments</code></td><td>FK occurrence／part／vehicle／diagram</td><td>verified 適用關係與 derivation</td></tr>
+      <tr><td><code>compatibility_hints</code></td><td>FK part</td><td>搜尋頁粗略相容文字</td></tr>
+      <tr><td><code>part_relations</code></td><td>FK source part</td><td>replacement／substitution 關係</td></tr>
+      <tr><td><code>parse_failures</code></td><td>FK response</td><td>parser error 與 selector context</td></tr>
+      <tr><td><code>robots_snapshots</code></td><td>FK run／response</td><td>robots hash 與當次 User-Agent</td></tr>
+    </tbody>
+  </table>
+
+  <h2>5. NHTSA MySQL Schema</h2>
+  <p>權威 DDL：<code>src/partsouq_crawler/nhtsa/mysql_schema.sql</code></p>
+  <pre><code>nhtsa_sync_runs
+        │
+        └── nhtsa_source_artifacts ── nhtsa_artifact_members
+                    │
+                    ├── nhtsa_artifact_records ── nhtsa_record_versions
+                    └── nhtsa_rejected_rows
+
+nhtsa_current_artifacts ── nhtsa_current_records (view)</code></pre>
+  <table>
+    <thead><tr><th>Table / View</th><th>Key / 關聯</th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td><code>nhtsa_schema_migrations</code></td><td>PK <code>version</code></td><td>MySQL schema 版本</td></tr>
+      <tr><td><code>nhtsa_sync_runs</code></td><td>PK <code>id</code>；run index</td><td>一次 bulk／API run 與統計</td></tr>
+      <tr><td><code>nhtsa_source_artifacts</code></td><td>PK <code>id</code>；dataset/source/hash/parser unique</td><td>URL、headers、raw path、hash、狀態、行數</td></tr>
+      <tr><td><code>nhtsa_artifact_members</code></td><td>PK artifact／member；FK artifact</td><td>ZIP member／response.json 的 CRC、schema hash</td></tr>
+      <tr><td><code>nhtsa_record_versions</code></td><td>PK dataset／natural hash／record hash</td><td>完整 JSON payload 的不可覆寫版本</td></tr>
+      <tr><td><code>nhtsa_artifact_records</code></td><td>PK artifact／member／line；FK artifact/version</td><td>原始來源行到 record version 的 lineage</td></tr>
+      <tr><td><code>nhtsa_rejected_rows</code></td><td>UQ artifact／member／line；FK artifact</td><td>無法解析的原始列與錯誤</td></tr>
+      <tr><td><code>nhtsa_current_artifacts</code></td><td>PK dataset／source；FK artifact</td><td>已驗證 current artifact 指標</td></tr>
+      <tr><td><code>nhtsa_current_records</code></td><td>view</td><td>current payload 加 URL、SHA、member、line、parser version</td></tr>
+    </tbody>
+  </table>
+  <p>常用索引：<code>(dataset_name, external_id)</code>、<code>(dataset_name, make_name, model_name(191), model_year)</code>、<code>(dataset_name, campaign_number)</code>。</p>
+
+  <h2>6. 執行與驗收</h2>
+  <pre><code># NHTSA MySQL
+docker compose -f compose.nhtsa.yml up -d
+partsouq-crawler nhtsa-sync-bulk --scope all --run-id nhtsa-bulk-full
+partsouq-crawler nhtsa-sync-api --scope all --run-id nhtsa-api-full
+partsouq-crawler nhtsa-status
+
+# PartSouq 現況查核
+partsouq-crawler crawl-status \
+  --sqlite output/partsouq-live.sqlite3 \
+  --run-id partsouq-genuine-full
+
+# 品質檢查
+python -m pytest
+ruff check .
+ruff format --check .
+mypy src
+git diff --check</code></pre>
+  <p>PartSouq 必須同時核對 challenge count、normalized tables、provenance 與 raw response；NHTSA 必須核對 current source manifest、source rows、current rejected、raw SHA、foreign keys、orphan rows與 MySQL <code>CHECK TABLE</code>。</p>
+
+  <h2>7. 目前不能宣稱的事項</h2>
+  <ul>
+    <li>不能宣稱 PartSouq 型錄已爬回；目前正式型錄相關表均為 0。</li>
+    <li>不能把 robots.txt 或 Cloudflare challenge 當型錄成果。</li>
+    <li>不能宣稱 NHTSA 全站所有研究資料都已下載；目前完成的是本文件列出的 12 個 Vehicle Safety／vPIC／CSSI datasets。</li>
+    <li>不能宣稱 Playwright、Selenium 或 stealth 能保證通過 Cloudflare。</li>
+    <li>不能把 raw NHTSA artifacts、MySQL volume 或私人 <code>.env</code> 上傳 GitHub。</li>
+  </ul>
+</body>
+</html>

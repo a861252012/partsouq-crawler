@@ -1,8 +1,10 @@
-# PartSouq Genuine Catalog crawler
+# PartSouq 與 NHTSA 官方資料同步器
 
 這是一套 evidence-first、可斷點續爬的 Python crawler。它只讀取 PartSouq 公開頁面，先保存每次實際 HTTP response，再解析車輛、分類、圖組、零件與 fitment 到本機 SQLite。
 
 它不會解 CAPTCHA、注入 `cf_clearance`、輪替 proxy 或繞過 Cloudflare。遇到 challenge 時會保存證據、將 run 標成 `blocked`，並以非 0 code 結束。
+
+NHTSA 路徑與 PartSouq 分離：NHTSA 使用官方 bulk download／API，normalized 資料直接寫入 MySQL，raw ZIP／CSV／JSON 以 SHA-256 命名保存在本機。NHTSA 不使用 SQLite。
 
 ## 安裝
 
@@ -21,6 +23,59 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e '.[dev]'
 ```
+
+## NHTSA：啟動 MySQL
+
+此 Compose 只建立專案自己的 `nhtsa-mysql`，綁定 `127.0.0.1:3308`，不會碰本機既有的 3306 MySQL：
+
+```bash
+docker compose -f compose.nhtsa.yml up -d
+cp -n .env.example .env
+```
+
+預設建立 `nhtsa` 與測試專用的 `nhtsa_test`。正式環境請覆寫 `.env` 內的密碼；`.env` 不應提交。
+
+## NHTSA：資料範圍與全量同步
+
+目前同步 NHTSA 官方 Vehicle Safety 資料：
+
+- Safety Ratings
+- Recalls
+- Investigations
+- Complaints
+- Manufacturer Communications summary
+- Manufacturer Communications／TSB detail
+- CSSI car-seat inspection stations（全州與領地）
+- vPIC makes、models、manufacturers、variables、variable values
+
+提供的需求附件沒有 NHTSA 段落，因此本實作以 NHTSA 官方 Datasets and APIs 頁面的 Vehicle Safety 範圍為準；FARS crash statistics 不在目前範圍。
+
+執行：
+
+```bash
+partsouq-crawler nhtsa-sync-bulk --scope all --run-id nhtsa-bulk-full
+partsouq-crawler nhtsa-sync-api --scope all --run-id nhtsa-api-full
+partsouq-crawler nhtsa-status
+```
+
+也可先按範圍執行：
+
+```bash
+partsouq-crawler nhtsa-sync-bulk --scope safety-ratings
+partsouq-crawler nhtsa-sync-bulk --scope recalls
+partsouq-crawler nhtsa-sync-bulk --scope investigations
+partsouq-crawler nhtsa-sync-bulk --scope complaints
+partsouq-crawler nhtsa-sync-bulk --scope manufacturer-communications-summary
+partsouq-crawler nhtsa-sync-bulk --scope manufacturer-communications
+partsouq-crawler nhtsa-sync-api --scope vpic
+partsouq-crawler nhtsa-sync-api --scope cssi
+```
+
+每個來源先下載到 `NHTSA_RAW_DIR`，檢查 ZIP member、CRC、欄位 schema 與逐列解析，再批次寫入 MySQL。選定範圍只有在全部 artifact 都 `imported` 且零拒絕時，才會原子更新 current view。失敗資料會保留並標成 `quarantined`，不會冒充完成。
+
+`output/` 已由 Git 忽略。Complaints、CSSI 等官方資料可能含 VIN 或聯絡欄位，不要把 raw artifact、DB volume 或匯出檔提交到 GitHub。
+
+vPIC 只允許程式內明列的集合型 endpoint。VIN decode、VIN 批次 decode、VIN 枚舉與任意 URL 都會被 policy 拒絕。
 
 ## 低頻 probe
 
@@ -106,7 +161,7 @@ SELECT id, http_status, content_type, is_cloudflare_challenge,
 FROM http_responses ORDER BY id DESC LIMIT 20;'
 ```
 
-資料表與 provenance 查詢請看 [DATABASE.md](DATABASE.md)。資料流與 failure boundary 請看 [ARCHITECTURE.md](ARCHITECTURE.md)。
+資料表與 provenance 查詢請看 [DATABASE.md](DATABASE.md)。資料流與 failure boundary 請看 [ARCHITECTURE.md](ARCHITECTURE.md)。本次完整需求、注意事項、實際進度與兩套 schema 另提供 [Markdown](docs/requirements-notes-schema.md) 及 [HTML](docs/requirements-notes-schema.html)。
 
 ## 驗證
 

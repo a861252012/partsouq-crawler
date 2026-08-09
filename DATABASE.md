@@ -1,5 +1,7 @@
 # Database
 
+本專案有兩條完全分離的儲存路徑：PartSouq 使用 SQLite；NHTSA 直接使用 MySQL。下列第一段是 PartSouq，後半段是 NHTSA。
+
 正式 DB 預設為 `output/partsouq-live.sqlite3`。連線會啟用 foreign keys、WAL 與 5 秒 busy timeout。所有 HTTP body 都先對未壓縮 bytes 計算 SHA-256，再以 zlib 壓縮及內容雜湊去重。
 
 ## 關聯
@@ -104,3 +106,46 @@ partsouq-crawler snapshot-publish \
 後台必須以唯讀模式開啟快照，不可直接連線或回寫 live DB。
 
 Raw body 是 reparse 與稽核的負載核心，預設不自動刪除。用 `db-status` 檢查 raw/compressed bytes 與 compression ratio，再依明確 retention policy 另行歸檔；本專案不會靜默清理證據。
+
+## NHTSA MySQL
+
+```text
+nhtsa_sync_runs
+        │
+        └── nhtsa_source_artifacts ── nhtsa_artifact_members
+                    │
+                    ├── nhtsa_artifact_records ── nhtsa_record_versions
+                    └── nhtsa_rejected_rows
+
+nhtsa_current_artifacts ── nhtsa_current_records (view)
+```
+
+- `nhtsa_sync_runs`：一次 bulk／API 同步的範圍、狀態與計數。
+- `nhtsa_source_artifacts`：每個下載檔或 API response 的 URL、headers、SHA-256、本機 raw path、parser version 與狀態。
+- `nhtsa_artifact_members`：ZIP member 或 `response.json` 的 bytes、CRC、欄位清單與 schema hash。
+- `nhtsa_record_versions`：依 dataset、natural key 與完整 payload SHA 保存所有觀察到的內容版本；完整來源欄位存於 MySQL `JSON`。
+- `nhtsa_artifact_records`：每個原始 member／行號到 record version 的 lineage。官方來源的完全相同重複列仍保留各自行號。
+- `nhtsa_rejected_rows`：無法解析或違反資料約束的原始列與錯誤。
+- `nhtsa_current_artifacts`：通過驗證後原子發佈的目前 artifact 指標。
+- `nhtsa_current_records`：目前已發佈資料與來源 URL、artifact SHA、member、行號及 parser version。
+
+常用查詢：
+
+```sql
+SELECT dataset_name, COUNT(*)
+FROM nhtsa_current_records
+GROUP BY dataset_name
+ORDER BY dataset_name;
+
+SELECT dataset_name, source_key, status, source_rows, rejected_rows, sha256
+FROM nhtsa_source_artifacts
+ORDER BY id DESC;
+
+SELECT dataset_name, external_id, payload_json,
+       source_url, source_artifact_sha256, source_member, source_line
+FROM nhtsa_current_records
+WHERE dataset_name = 'recalls'
+LIMIT 10;
+```
+
+NHTSA raw artifacts 不放進 SQLite，也不只存摘要；MySQL 保存可查詢的完整 JSON payload，磁碟保留原始官方 bytes。`nhtsa-status` 回報 current dataset 計數、進行中 artifact 的已落庫行數、artifact 狀態、拒絕列與最近 runs。

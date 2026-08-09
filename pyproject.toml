@@ -5,16 +5,18 @@ build-backend = "hatchling.build"
 [project]
 name = "partsouq-crawler"
 version = "0.1.0"
-description = "Resumable, evidence-first crawler for public PartSouq Genuine Catalog pages"
+description = "Evidence-first PartSouq crawler and NHTSA official-data sync"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "Proprietary" }
 authors = [{ name = "Local workspace" }]
 dependencies = [
     "aiohttp>=3.11,<4",
+    "aiofiles>=24,<26",
     "aiosqlite>=0.20,<1",
     "certifi>=2025.1.31",
     "lxml>=5.3,<7",
+    "pymysql>=1.1,<2",
 ]
 
 [project.optional-dependencies]
@@ -23,6 +25,8 @@ dev = [
     "pytest>=8.3,<9",
     "pytest-cov>=6,<8",
     "ruff>=0.9,<1",
+    "types-aiofiles>=24,<26",
+    "types-PyMySQL>=1.1,<2",
 ]
 
 [project.scripts]
