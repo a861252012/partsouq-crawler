@@ -25,6 +25,8 @@ class IngestService:
         response_id: int,
         source_url: str,
         parsed: ParsedPage,
+        verified_fitments: bool = True,
+        fitment_derivation: str = "genuine_catalog_diagram_part_occurrence",
     ) -> int:
         inserted = 0
         async with self.repository.transaction() as connection:
@@ -76,6 +78,8 @@ class IngestService:
                         response_id=response_id,
                     )
                     diagram_ids[diagram.code_raw or f"id:{diagram_id}"] = diagram_id
+                    if diagram.name_raw:
+                        diagram_ids[f"name:{diagram.name_raw}"] = diagram_id
                     inserted += created
 
             for part in parsed.parts:
@@ -109,6 +113,8 @@ class IngestService:
                     part=part,
                     source_url=source_url,
                     response_id=response_id,
+                    is_verified=verified_fitments,
+                    derivation=fitment_derivation,
                 )
                 inserted += created
 
@@ -440,8 +446,9 @@ class IngestService:
         part: PartRecord,
         source_url: str,
         response_id: int,
+        is_verified: bool,
+        derivation: str,
     ) -> tuple[int, int]:
-        derivation = "genuine_catalog_diagram_part_occurrence"
         row_id, created = await self._get_or_create(
             connection,
             select_sql="SELECT id FROM fitments WHERE part_occurrence_id = ? AND derivation = ?",
@@ -451,14 +458,16 @@ class IngestService:
                     part_occurrence_id, part_number_id, vehicle_configuration_id,
                     diagram_id, is_verified, derivation, confidence,
                     effective_from, effective_to, source_url
-                ) VALUES (?, ?, ?, ?, 1, ?, 1.0, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             insert_values=(
                 occurrence_id,
                 part_id,
                 vehicle_id,
                 diagram_id,
+                is_verified,
                 derivation,
+                1.0 if is_verified else 0.7,
                 part.part_from,
                 part.part_to,
                 source_url,
@@ -471,8 +480,13 @@ class IngestService:
     def _choose_diagram(part: PartRecord, diagram_ids: dict[str, int]) -> int | None:
         if part.diagram_code_raw and part.diagram_code_raw in diagram_ids:
             return diagram_ids[part.diagram_code_raw]
-        if len(diagram_ids) == 1:
-            return next(iter(diagram_ids.values()))
+        if part.diagram_name_raw:
+            diagram_id = diagram_ids.get(f"name:{part.diagram_name_raw}")
+            if diagram_id is not None:
+                return diagram_id
+        unique_ids = set(diagram_ids.values())
+        if len(unique_ids) == 1:
+            return next(iter(unique_ids))
         return None
 
     async def _source(

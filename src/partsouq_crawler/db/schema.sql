@@ -88,6 +88,29 @@ CREATE TABLE IF NOT EXISTS http_responses (
 CREATE INDEX IF NOT EXISTS idx_http_responses_run_url
 ON http_responses(run_id, requested_url);
 
+CREATE TABLE IF NOT EXISTS archive_captures (
+    id INTEGER PRIMARY KEY,
+    response_id INTEGER NOT NULL UNIQUE REFERENCES http_responses(id) ON DELETE CASCADE,
+    archive_source TEXT NOT NULL,
+    collection_name TEXT,
+    captured_at TEXT NOT NULL,
+    warc_filename TEXT,
+    warc_offset INTEGER,
+    warc_length INTEGER,
+    archive_digest TEXT,
+    truncation_reason TEXT,
+    metadata_json TEXT NOT NULL,
+    imported_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_archive_captures_source_time
+ON archive_captures(archive_source, captured_at);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_archive_captures_warc_location
+ON archive_captures(
+    archive_source, collection_name, warc_filename, warc_offset, warc_length
+);
+
 CREATE TABLE IF NOT EXISTS record_sources (
     id INTEGER PRIMARY KEY,
     record_type TEXT NOT NULL,

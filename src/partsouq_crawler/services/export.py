@@ -32,6 +32,10 @@ EXPORT_COLUMNS = (
     "Quantity",
     "Note",
     "Source URL",
+    "Source mode",
+    "Archive source",
+    "Captured at",
+    "Archive truncation",
     "Response ID",
     "Response SHA-256",
     "Confidence",
@@ -44,9 +48,15 @@ class ExportService:
     def __init__(self, repository: Repository) -> None:
         self.repository = repository
 
-    async def rows(self, *, include_compatibility_hints: bool = False) -> list[dict[str, Any]]:
+    async def rows(
+        self,
+        *,
+        include_compatibility_hints: bool = False,
+        include_unverified_fitments: bool = False,
+    ) -> list[dict[str, Any]]:
+        verified_clause = "" if include_unverified_fitments else "WHERE f.is_verified = 1"
         cursor = await self.repository.connection.execute(
-            """
+            f"""
             SELECT
                 v.catalog_brand AS brand,
                 v.name_raw AS vehicle_name,
@@ -70,6 +80,11 @@ class ExportService:
                 po.quantity_raw,
                 po.note_raw,
                 f.source_url,
+                CASE WHEN ac.id IS NULL THEN 'live_http' ELSE 'historical_archive' END
+                  AS source_mode,
+                ac.archive_source,
+                ac.captured_at,
+                ac.truncation_reason,
                 rs.response_id,
                 hr.body_sha256,
                 f.confidence,
@@ -83,17 +98,27 @@ class ExportService:
             LEFT JOIN taxonomy_nodes tn ON tn.id = d.taxonomy_node_id
             JOIN record_sources rs ON rs.record_type = 'fitment' AND rs.record_id = f.id
             JOIN http_responses hr ON hr.id = rs.response_id
-            WHERE f.is_verified = 1
+            LEFT JOIN archive_captures ac ON ac.response_id = hr.id
+            {verified_clause}
             ORDER BY pn.number_normalized, v.id, d.id, po.id
-            """
+            """  # noqa: S608 - clause is selected from a fixed boolean option.
         )
         rows = [self._fitment_row(dict(row)) for row in await cursor.fetchall()]
         if include_compatibility_hints:
             rows.extend(await self._hint_rows())
         return rows
 
-    async def export(self, path: Path, *, include_compatibility_hints: bool = False) -> int:
-        rows = await self.rows(include_compatibility_hints=include_compatibility_hints)
+    async def export(
+        self,
+        path: Path,
+        *,
+        include_compatibility_hints: bool = False,
+        include_unverified_fitments: bool = False,
+    ) -> int:
+        rows = await self.rows(
+            include_compatibility_hints=include_compatibility_hints,
+            include_unverified_fitments=include_unverified_fitments,
+        )
         if path.suffix.lower() == ".jsonl":
             return write_jsonl(path, rows)
         if path.suffix.lower() == ".csv":
@@ -130,6 +155,10 @@ class ExportService:
             row["quantity_raw"],
             row["note_raw"],
             row["source_url"],
+            row["source_mode"],
+            row["archive_source"],
+            row["captured_at"],
+            row["truncation_reason"],
             row["response_id"],
             row["body_sha256"],
             row["confidence"],
@@ -162,6 +191,7 @@ class ExportService:
                     "Number": row["number_raw"],
                     "Note": row["compatibility_text"],
                     "Source URL": row["source_url"],
+                    "Source mode": "live_http",
                     "Response ID": row["response_id"],
                     "Response SHA-256": row["body_sha256"],
                     "Confidence": 0.4,

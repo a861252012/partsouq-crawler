@@ -337,6 +337,70 @@ class Repository:
                 (status, error, next_attempt_at, terminal, now, queue_id),
             )
 
+    async def add_archive_capture(
+        self,
+        *,
+        response_id: int,
+        archive_source: str,
+        captured_at: str,
+        collection_name: str | None = None,
+        warc_filename: str | None = None,
+        warc_offset: int | None = None,
+        warc_length: int | None = None,
+        archive_digest: str | None = None,
+        truncation_reason: str | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> None:
+        async with self.transaction() as connection:
+            await connection.execute(
+                """
+                INSERT INTO archive_captures(
+                    response_id, archive_source, collection_name, captured_at,
+                    warc_filename, warc_offset, warc_length, archive_digest,
+                    truncation_reason, metadata_json, imported_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    response_id,
+                    archive_source,
+                    collection_name,
+                    captured_at,
+                    warc_filename,
+                    warc_offset,
+                    warc_length,
+                    archive_digest,
+                    truncation_reason,
+                    json.dumps(metadata or {}, sort_keys=True),
+                    utc_now(),
+                ),
+            )
+
+    async def archive_capture_exists(
+        self,
+        *,
+        archive_source: str,
+        collection_name: str,
+        warc_filename: str,
+        warc_offset: int,
+        warc_length: int,
+    ) -> bool:
+        cursor = await self.connection.execute(
+            """
+            SELECT 1 FROM archive_captures
+            WHERE archive_source = ? AND collection_name = ?
+              AND warc_filename = ? AND warc_offset = ? AND warc_length = ?
+            LIMIT 1
+            """,
+            (
+                archive_source,
+                collection_name,
+                warc_filename,
+                warc_offset,
+                warc_length,
+            ),
+        )
+        return await cursor.fetchone() is not None
+
     async def add_parse_failure(
         self,
         response_id: int,
@@ -557,6 +621,7 @@ class Repository:
             "discovery_edges",
             "http_responses",
             "response_bodies",
+            "archive_captures",
             "record_sources",
             *(table for _, table in NORMALIZED_TABLES),
             "parse_failures",

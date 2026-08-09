@@ -40,8 +40,29 @@ Store headers + status + raw body hash/zlib FIRST
 - `db.repository`：單一 aiosqlite connection 與 write lock；raw response、queue、status、backup 與 DB health query。
 - `parsers.base`：generic metadata/table/breadcrumb parser。Toyota、Audi、Renault adapter 只處理欄位名稱差異。
 - `services.ingest`：冪等 normalized 寫入與 `record_sources`。
+- `services.archive_import`：匯入 Common Crawl、Wayback 或使用者合法持有的 HTML；不連線 PartSouq，先保存 raw response 與 archive provenance，再以 unverified historical derivation 寫入。
 - `services.reparse`：只讀 raw body，重新分類與解析，不發 HTTP request。
-- `services.export`：verified fitment 為預設，compatibility hint 必須明確 opt in。
+- `services.export`：verified fitment 為預設；compatibility hint 與 unverified historical fitment 都必須明確 opt in。
+
+## 歷史封存資料流
+
+```text
+Common Crawl WARC / Wayback capture / lawful owned HTML
+                         │
+                         ▼
+           raw response + SHA-256 FIRST
+                         │
+                         ▼
+  archive_captures(capture time / digest / WARC location / truncation)
+                         │
+                         ▼
+             parser + normalized records
+                         │
+                         ▼
+      is_verified=0 + historical_archive derivation
+```
+
+歷史封存 run 固定為 `completed_with_gaps`，不會更新 live/current view。截斷頁可保存已出現的直接記錄，但不能宣稱該頁或該車型完整。
 
 ## 狀態與提交順序
 

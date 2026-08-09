@@ -24,7 +24,7 @@ from partsouq_crawler.parsers.brands.renault import RenaultBrandAdapter
 from partsouq_crawler.parsers.brands.toyota import ToyotaBrandAdapter
 from partsouq_crawler.parsers.common import clean_text, parse_unambiguous_range
 
-PARSER_VERSION = "1"
+PARSER_VERSION = "2"
 RecordT = TypeVar("RecordT")
 
 
@@ -80,6 +80,23 @@ class CatalogParser:
             value = clean_text(element.get("data-value"))
             if key and value:
                 metadata.setdefault(key.rstrip(":"), value)
+        for table in document.xpath("//table"):
+            header_rows = table.xpath(".//tr[th]")
+            data_rows = table.xpath(".//tr[td]")
+            if not header_rows or not data_rows:
+                continue
+            headers = [clean_text(cell.text_content()) for cell in header_rows[0].xpath("./th")]
+            values = [clean_text(cell.text_content()) for cell in data_rows[0].xpath("./td")]
+            normalized_headers = {header.lower() for header in headers if header}
+            if not normalized_headers.intersection({"brand", "make"}):
+                continue
+            for key, value in zip(headers, values, strict=False):
+                if key and value:
+                    metadata.setdefault(key.rstrip(":"), value)
+        breadcrumb = CatalogParser._breadcrumb(document)
+        if len(breadcrumb) >= 3 and breadcrumb[0].lower().startswith("genuine parts catalog"):
+            metadata.setdefault("Brand", breadcrumb[1])
+            metadata.setdefault("Name", breadcrumb[2])
         return metadata
 
     @staticmethod
@@ -96,6 +113,11 @@ class CatalogParser:
 
     @staticmethod
     def _taxonomies(document: HtmlElement) -> list[TaxonomyRecord]:
+        path = CatalogParser._breadcrumb(document)
+        return [TaxonomyRecord(tuple(path))] if path else []
+
+    @staticmethod
+    def _breadcrumb(document: HtmlElement) -> list[str]:
         candidates = document.xpath(
             "//*[contains(concat(' ', normalize-space(@class), ' '), ' breadcrumb ')]"
             "//*[self::a or self::li or self::span][normalize-space()]"
@@ -105,7 +127,7 @@ class CatalogParser:
             value = clean_text(element.text_content())
             if value and (not path or path[-1] != value):
                 path.append(value)
-        return [TaxonomyRecord(tuple(path))] if path else []
+        return path
 
     def _diagrams(self, document: HtmlElement, metadata: dict[str, str]) -> list[DiagramRecord]:
         records: list[DiagramRecord] = []
@@ -141,6 +163,14 @@ class CatalogParser:
                 records.append(
                     DiagramRecord(code, name, range_raw, parsed_range.start, parsed_range.end)
                 )
+        if not records:
+            for heading in document.xpath(
+                "//div[contains(concat(' ', normalize-space(@class), ' '), ' unit-header ')]"
+                "//h2[normalize-space()]"
+            ):
+                name = clean_text(heading.text_content())
+                if name:
+                    records.append(DiagramRecord(None, name))
         return self._unique(records)
 
     def _parts(self, document: HtmlElement, metadata: dict[str, str]) -> list[PartRecord]:
@@ -155,12 +185,13 @@ class CatalogParser:
             indexes = {
                 "name": self._header_index(headers, ("part name", "description", "name")),
                 "diagram": self._header_index(headers, ("diagram code", "diagram")),
-                "callout": self._header_index(headers, ("callout", "ref", "position")),
-                "quantity": self._header_index(headers, ("quantity", "qty")),
-                "range": self._header_index(headers, ("part range", "range")),
+                "callout": self._header_index(headers, ("callout", "ref", "position", "code")),
+                "quantity": self._header_index(headers, ("quantity", "qty", "qty required")),
+                "range": self._header_index(headers, ("part range", "range", "date_range")),
                 "condition": self._header_index(headers, ("condition", "applicability")),
                 "note": self._header_index(headers, ("note", "remarks")),
             }
+            diagram_name = self._containing_diagram_name(table)
             for cells in self._data_rows(table):
                 number = self._cell(cells, number_index)
                 if not number:
@@ -174,6 +205,7 @@ class CatalogParser:
                         diagram_code_raw=self._cell(cells, indexes["diagram"])
                         or metadata.get("Diagram Code")
                         or metadata.get("Diagram"),
+                        diagram_name_raw=diagram_name,
                         callout_raw=self._cell(cells, indexes["callout"]),
                         quantity_raw=self._cell(cells, indexes["quantity"]),
                         part_range_raw=range_raw,
@@ -187,6 +219,19 @@ class CatalogParser:
                     )
                 )
         return self._unique(records)
+
+    @staticmethod
+    def _containing_diagram_name(table: HtmlElement) -> str | None:
+        panels = table.xpath(
+            "ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' panel ')][1]"
+        )
+        if not panels:
+            return None
+        headings = panels[0].xpath(
+            ".//div[contains(concat(' ', normalize-space(@class), ' '), ' unit-header ')]"
+            "//h2[normalize-space()]"
+        )
+        return clean_text(headings[0].text_content()) if headings else None
 
     def _compatibility_hints(
         self, document: HtmlElement, url: str

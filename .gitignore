@@ -13,5 +13,7 @@ dist/
 *.egg-info/
 output/*
 !output/.gitkeep
+outputs/
+work/
 tests/tmp/*
 !tests/tmp/.gitkeep

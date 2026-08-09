@@ -45,6 +45,7 @@ class PartRecord:
     name_en_raw: str | None = None
     part_brand_raw: str | None = None
     diagram_code_raw: str | None = None
+    diagram_name_raw: str | None = None
     callout_raw: str | None = None
     quantity_raw: str | None = None
     part_range_raw: str | None = None

@@ -10,7 +10,8 @@
 crawl_runs 1 ── n crawl_queue 1 ── n http_responses n ── 1 response_bodies
      │                 │                    │
      └── discovery_edges                    ├── parse_failures
-                                            └── record_sources
+                                            ├── record_sources
+                                            └── 0..1 archive_captures
                                                    │
 vehicle_configurations 1 ── n taxonomy_nodes       │
           │                       │                 │
@@ -31,13 +32,14 @@ part_numbers 1 ── n part_relations
 - `discovery_edges`：URL 從 seed、robots、sitemap 或 HTML 被發現的來源邊。
 - `http_responses`：每次實際 HTTP response 的 status、headers、redirect、SHA 與 challenge 判斷。`Set-Cookie` 會 redact。
 - `response_bodies`：依 SHA-256 去重的 zlib body。
+- `archive_captures`：歷史封存的 capture time、collection、WARC 座標、digest 與截斷原因；一筆 archive capture 對應一筆 raw response。
 - `record_sources`：normalized record 到 response、parser 名稱與版本的 provenance。
 - `vehicle_configurations`：品牌、車名、model、原始 Prod Period 與安全解析結果。
 - `taxonomy_nodes`：任意深度的 parent-child 分類樹與完整 path。
 - `diagrams`：圖組、Diagram Range 與車輛、分類關聯。
 - `part_numbers`：保留原始料號及搜尋用 normalized value；前導 0 不會被移除。
 - `part_occurrences`：同料號在特定車輛、diagram、callout、range、condition 的一次出現。
-- `fitments`：由 Genuine Catalog diagram/part occurrence 正向建立的 verified 關聯。
+- `fitments`：由 Genuine Catalog diagram/part occurrence 建立；live 直接證據可為 verified，歷史封存固定為 unverified 並保存 derivation。
 - `compatibility_hints`：`/search/all` 的粗略文字；不會建立 verified fitment。
 - `part_relations`：網站實際顯示的 substitution/replacement 等關係；不做 transitive closure。
 - `parse_failures`：parser/type/error/context；不重複保存 HTML。

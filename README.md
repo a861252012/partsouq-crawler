@@ -104,6 +104,45 @@ Browser transport 預設為 headed、強制 `concurrency=1`，並使用全新的
 
 2026-08-10 的實際驗證結果：Brave/Playwright 可讀到 `robots.txt` 200，但 Genuine Catalog 入口仍回傳 `HTTP 403` 與 `cf-mitigated: challenge`。Run 正確標為 `blocked`，正式型錄資料新增 0 筆。
 
+## PartSouq 歷史封存匯入
+
+Common Crawl 與 Internet Archive Wayback 的公開歷史快照可在不連線 PartSouq 的情況下提供真實型錄 HTML。這些資料必須標示為 `historical_archive`，不能當成 live/current 或全量資料。
+
+已下載的 Common Crawl CDXJ index 可直接批次匯入。匯入器只接受精確的 `/en/catalog/genuine/diagram` 路徑，預設排除 query 中的 17 碼 VIN，並依 WARC filename／offset／length 斷點續跑：
+
+```bash
+partsouq-crawler common-crawl-import \
+  --sqlite output/partsouq-common-crawl.sqlite3 \
+  --run-id common-crawl-diagrams \
+  --index /path/to/CC-MAIN-index.ndjson \
+  --delay 0.25 --timeout 60
+```
+
+2026-08-10 實測三期 index 共選出 142 筆 diagram captures，142 筆下載成功、0 筆失敗。115 筆型錄頁解析出 2,945 個唯一料號與 5,928 筆 occurrence；另 27 筆為歷史 Cloudflare challenge，已保留 raw response 但沒有進 parser。全部 fitment 都維持 `is_verified=0`，不能視為 current 或全量。
+
+先取得合法公開的 HTML capture，再匯入：
+
+```bash
+partsouq-crawler archive-import \
+  --sqlite output/partsouq-archive.sqlite3 \
+  --run-id archive-example \
+  --input /path/to/capture.html \
+  --source-url 'https://partsouq.com/en/catalog/genuine/diagram?...' \
+  --archive-source wayback \
+  --captured-at '2021-07-24T01:23:19Z'
+```
+
+匯入順序是 raw body／SHA-256、`archive_captures` provenance、parser、normalized tables。歷史 fitment 固定為 `is_verified=0`。預設 export 仍只輸出 verified fitment；要檢視歷史資料必須明確指定：
+
+```bash
+partsouq-crawler export \
+  --sqlite output/partsouq-archive.sqlite3 \
+  --output output/partsouq-archive.csv \
+  --include-unverified-fitments
+```
+
+Archive index、raw HTML、DB 與 CSV 可能含 `ssd` 或 VIN。它們都留在 Git ignore 的輸出目錄，不得上傳 GitHub。
+
 ## 全量執行與續爬
 
 設定具聯絡方式的固定 User-Agent：

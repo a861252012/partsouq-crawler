@@ -9,6 +9,8 @@ from partsouq_crawler.parsers.base import CatalogParser, ParseError
 from partsouq_crawler.parsers.brands.audi import AudiBrandAdapter
 from partsouq_crawler.parsers.brands.renault import RenaultBrandAdapter
 from partsouq_crawler.parsers.brands.toyota import ToyotaBrandAdapter
+from partsouq_crawler.services.archive_import import ArchiveCaptureInput, ArchiveImportService
+from partsouq_crawler.services.export import ExportService
 from partsouq_crawler.services.ingest import IngestService
 from partsouq_crawler.services.reparse import ReparseService
 
@@ -29,6 +31,26 @@ PARTS_HTML = b"""
   <tr><td>00123-AB</td><td>PUMP ASSY</td><td>1603</td><td>1</td><td>1</td><td>2008-01 ~ 2010-11</td><td>ACV40..ARL</td><td>A</td></tr>
   <tr><td>00123-AB</td><td>PUMP ASSY</td><td>1603</td><td>1</td><td>1</td><td>2010-12 ~ 2011-12</td><td>ACV40..ARL</td><td>B</td></tr>
 </table>
+</body></html>
+"""
+
+ARCHIVED_DIAGRAM_HTML = b"""
+<html><body>
+<ul class="breadcrumb">
+  <li>Genuine Parts Catalogs</li><li>Honda</li><li>INTEGRA Europe 17ST701</li>
+  <li>1. ENGINE</li>
+</ul>
+<table>
+  <tr><th>Brand</th><th>Name</th><th>Region</th><th>Npl</th><th>Manufactured</th></tr>
+  <tr><td>HONDA</td><td>INTEGRA</td><td>Europe</td><td>17ST701</td><td>1998-2000</td></tr>
+</table>
+<div class="panel">
+  <div class="unit-header"><h2>ALTERNATOR BRACKET</h2></div>
+  <table>
+    <tr><th>Number</th><th>Name</th><th>Code</th><th>Qty Required</th></tr>
+    <tr><td>31110P73A01</td><td>BRACKET COMP.</td><td>1</td><td>1</td></tr>
+  </table>
+</div>
 </body></html>
 """
 
@@ -62,6 +84,23 @@ def test_part_rows_and_multiple_diagrams() -> None:
     assert len(parsed.parts) == 2
     assert parsed.parts[0].number_raw == "00123-AB"
     assert parsed.parts[0].condition_raw == "ACV40..ARL"
+
+
+def test_real_part_page_shape_links_vehicle_diagram_and_part() -> None:
+    parsed = CatalogParser().parse(
+        "https://partsouq.com/en/catalog/genuine/diagram?c=Honda&number=31110P73A01",
+        ARCHIVED_DIAGRAM_HTML,
+    )
+    assert parsed.vehicle is not None
+    assert parsed.vehicle.brand_raw == "HONDA"
+    assert parsed.vehicle.name_raw == "INTEGRA"
+    assert parsed.vehicle.model_raw == "17ST701"
+    assert parsed.vehicle.prod_period_raw == "1998-2000"
+    assert len(parsed.diagrams) == 1
+    assert parsed.diagrams[0].name_raw == "ALTERNATOR BRACKET"
+    assert parsed.parts[0].diagram_name_raw == "ALTERNATOR BRACKET"
+    assert parsed.parts[0].callout_raw == "1"
+    assert parsed.parts[0].quantity_raw == "1"
 
 
 def test_category_depth_over_three_is_preserved() -> None:
@@ -196,6 +235,46 @@ def test_reparse_is_idempotent(tmp_path: Path) -> None:
         assert first["records_inserted"] > 0
         assert second["records_inserted"] == 0
         assert counts_after_first == counts_after_second
+        await repository.close()
+
+    asyncio.run(scenario())
+
+
+def test_archive_import_preserves_capture_and_does_not_verify_fitment(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        input_path = tmp_path / "capture.html"
+        input_path.write_bytes(ARCHIVED_DIAGRAM_HTML)
+        repository = await Repository.create(tmp_path / "archive.sqlite3")
+        report = await ArchiveImportService(repository).import_html(
+            run_key="archive-test",
+            capture=ArchiveCaptureInput(
+                input_path=input_path,
+                source_url=(
+                    "https://partsouq.com/en/catalog/genuine/diagram?c=Honda&number=31110P73A01"
+                ),
+                archive_source="wayback",
+                captured_at="2021-07-24T01:23:19Z",
+                archive_digest="sha1:test",
+            ),
+        )
+        counts = await repository.table_counts()
+        assert report["parts_parsed"] == 1
+        assert report["current_or_complete"] is False
+        assert counts["archive_captures"] == 1
+        assert counts["vehicle_configurations"] == 1
+        assert counts["diagrams"] == 1
+        assert counts["part_occurrences"] == 1
+        assert counts["fitments"] == 1
+        cursor = await repository.connection.execute("SELECT is_verified, derivation FROM fitments")
+        fitment = await cursor.fetchone()
+        assert fitment is not None
+        assert fitment["is_verified"] == 0
+        assert fitment["derivation"] == "historical_archive_wayback"
+        assert await ExportService(repository).rows() == []
+        archive_rows = await ExportService(repository).rows(include_unverified_fitments=True)
+        assert len(archive_rows) == 1
+        assert archive_rows[0]["Source mode"] == "historical_archive"
+        assert archive_rows[0]["Captured at"] == "2021-07-24T01:23:19Z"
         await repository.close()
 
     asyncio.run(scenario())

@@ -9,10 +9,15 @@ class BaseBrandAdapter:
     aliases: dict[str, tuple[str, ...]] = {
         "brand": ("brand", "make"),
         "name": ("name", "vehicle", "vehicle name"),
-        "model": ("model", "model code", "sales code"),
+        "model": ("model", "model code", "sales code", "npl"),
         "description": ("description",),
         "options": ("options", "option"),
-        "prod_period": ("prod period", "production period", "prod range"),
+        "prod_period": (
+            "prod period",
+            "production period",
+            "prod range",
+            "manufactured",
+        ),
         "catalog_code": ("catalog", "catalog code"),
         "vehicle_external_id": ("vehicle id", "vid", "uid"),
     }

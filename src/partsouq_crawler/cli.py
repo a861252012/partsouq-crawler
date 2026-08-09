@@ -25,6 +25,8 @@ from partsouq_crawler.nhtsa.datasets import BULK_SOURCES_BY_SCOPE
 from partsouq_crawler.nhtsa.repository import NhtsaMySQLRepository
 from partsouq_crawler.nhtsa.service import NhtsaBulkSyncService
 from partsouq_crawler.parsers.base import CatalogParser, ParseError
+from partsouq_crawler.services.archive_import import ArchiveCaptureInput, ArchiveImportService
+from partsouq_crawler.services.common_crawl_import import CommonCrawlImportService
 from partsouq_crawler.services.export import ExportService
 from partsouq_crawler.services.ingest import IngestService
 from partsouq_crawler.services.reparse import ReparseService
@@ -94,6 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
     _database_argument(export)
     export.add_argument("--output", type=Path, required=True)
     export.add_argument("--include-compatibility-hints", action="store_true")
+    export.add_argument("--include-unverified-fitments", action="store_true")
 
     backup = subparsers.add_parser("db-backup")
     _database_argument(backup)
@@ -105,6 +108,38 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _database_argument(publish)
     publish.add_argument("--output", type=Path, required=True)
+
+    archive_import = subparsers.add_parser(
+        "archive-import",
+        help="Import a lawfully obtained historical HTML capture without contacting PartSouq",
+    )
+    _database_argument(archive_import)
+    archive_import.add_argument("--run-id", required=True)
+    archive_import.add_argument("--input", type=Path, required=True)
+    archive_import.add_argument("--source-url", required=True)
+    archive_import.add_argument(
+        "--archive-source",
+        choices=("common_crawl", "wayback", "owned_export"),
+        required=True,
+    )
+    archive_import.add_argument("--captured-at", required=True)
+    archive_import.add_argument("--collection")
+    archive_import.add_argument("--warc-filename")
+    archive_import.add_argument("--warc-offset", type=int)
+    archive_import.add_argument("--warc-length", type=int)
+    archive_import.add_argument("--archive-digest")
+    archive_import.add_argument("--truncation-reason")
+
+    common_crawl_import = subparsers.add_parser(
+        "common-crawl-import",
+        help="Download diagram WARC records listed in Common Crawl index files",
+    )
+    _database_argument(common_crawl_import)
+    common_crawl_import.add_argument("--run-id", required=True)
+    common_crawl_import.add_argument("--index", type=Path, action="append", required=True)
+    common_crawl_import.add_argument("--max-records", type=int, default=0)
+    common_crawl_import.add_argument("--delay", type=float, default=0.25)
+    common_crawl_import.add_argument("--timeout", type=float, default=60.0)
 
     nhtsa_sync = subparsers.add_parser(
         "nhtsa-sync-bulk",
@@ -202,17 +237,18 @@ async def dispatch(args: argparse.Namespace) -> int:
         if args.command == "dump-response":
             return await _dump_response(repository, args)
         if args.command == "reparse":
-            report = await ReparseService(repository).run(
+            reparse_report = await ReparseService(repository).run(
                 response_id=args.response_id,
                 run_id=args.run_id,
                 page_type=args.page_type,
             )
-            _print_json(report)
-            return 0 if report["failed"] == 0 else 1
+            _print_json(reparse_report)
+            return 0 if reparse_report["failed"] == 0 else 1
         if args.command == "export":
             count = await ExportService(repository).export(
                 args.output,
                 include_compatibility_hints=args.include_compatibility_hints,
+                include_unverified_fitments=args.include_unverified_fitments,
             )
             _print_json({"output": str(args.output), "rows": count})
             return 0
@@ -224,6 +260,34 @@ async def dispatch(args: argparse.Namespace) -> int:
             manifest = await repository.publish_snapshot(args.output)
             _print_json({"snapshot": str(args.output), "manifest": manifest})
             return 0
+        if args.command == "archive-import":
+            archive_report = await ArchiveImportService(repository).import_html(
+                run_key=args.run_id,
+                capture=ArchiveCaptureInput(
+                    input_path=args.input,
+                    source_url=args.source_url,
+                    archive_source=args.archive_source,
+                    captured_at=args.captured_at,
+                    collection_name=args.collection,
+                    warc_filename=args.warc_filename,
+                    warc_offset=args.warc_offset,
+                    warc_length=args.warc_length,
+                    archive_digest=args.archive_digest,
+                    truncation_reason=args.truncation_reason,
+                ),
+            )
+            _print_json(archive_report)
+            return 0 if archive_report["error"] is None else 1
+        if args.command == "common-crawl-import":
+            common_crawl_report = await CommonCrawlImportService(repository).run(
+                run_key=args.run_id,
+                index_paths=args.index,
+                max_records=args.max_records,
+                delay_seconds=args.delay,
+                timeout_seconds=args.timeout,
+            )
+            _print_json(common_crawl_report)
+            return 0 if common_crawl_report["failed"] == 0 else 1
         raise ValueError(f"unsupported command: {args.command}")
     finally:
         await repository.close()
