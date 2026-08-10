@@ -12,8 +12,8 @@ seed / robots / sitemap / HTML links
        lease + fencing + resume
                  │
                  ▼
- HTTP / Playwright / isolated NoDriver worker
- headed Chrome / persistent profile / low concurrency
+ HTTP / standard headless Playwright
+ one worker / single monthly canary / low frequency
                  │
                  ▼
  raw response + SHA-256 + headers FIRST
@@ -33,14 +33,13 @@ seed / robots / sitemap / HTML links
 - `crawl.engine`：run lifecycle、queue worker、lease heartbeat、fencing、signal pause、challenge circuit breaker。
 - `crawl.fetcher`：aiohttp 正常 GET、固定 UA、timeout、Retry-After 與 per-host delay。
 - `crawl.browser_fetcher`：標準 Playwright browser transport。使用 fresh context，不讀既有 Brave profile、不搬 cookie、不含 stealth。
-- `crawl.browser_worker_fetcher`：以 line-delimited JSON 控制獨立 Python 3.12 NoDriver worker；crawler core 不直接 import AGPL package。
-- `browser_worker/worker.py`：headed Chrome、持久 profile、target-scoped CDP raw body；只回傳最終 main-frame response，不輸出 cookie jar。
+- `crawl.browser_worker_fetcher`／`browser_worker/worker.py`：保留先前 NoDriver 研究路徑，不是正式月排程；不得由局部 200 推論為 server 全量可用。
 - `crawl.robots`／`crawl.sitemap`／`crawl.discovery`：robots gate、nested sitemap、gzip sitemap 與 HTML/data/meta/form URL discovery。
 - `crawl.challenge`：集中判斷 403、`cf-mitigated: challenge`、Cloudflare title/body markers。
 - `db.mysql_connection`：aiomysql pool、UTC、READ COMMITTED、schema migration、transaction rollback。
 - `db.repository`：persistent state、raw-first response、queue fencing、archive queue、status 與 health query。
 - `services.ingest`：依資料層次批次 upsert/select，再批次寫 `record_sources`；沒有 per-part SQL loop。
-- `services.reparse`：只讀 MySQL raw body，以目前 parser 重播；不連 PartSouq。
+- `services.reparse`：以 response ID keyset 分批讀 MySQL raw body，用目前 parser 重播；不連 PartSouq。另可預覽／清理 parser v2 誤收的導覽 taxonomy。
 - `services.export`：以 `(record_id, provenance_id)` keyset 每批 1,000 筆輸出。
 
 ## Challenge failure boundary
@@ -54,13 +53,13 @@ Challenge 是來源不可用狀態，不是空型錄：
 5. CLI 回非 0；`strict_complete=false`。
 6. Challenge body 不進 parser，也不會建立 normalized record。
 
-月排程保留同一 profile，最多進行 3 次、間隔 30 分鐘的 bounded retry。每次仍以 challenge circuit breaker 結束；不做人工點擊、付費 solver、proxy、UA 輪替或 `cf_clearance` 搬運。
+月排程使用標準 headless Playwright，固定單 worker、主頁導航至少間隔 30 秒。一般暫時錯誤最多重試 1 次，429 至少冷卻 6 小時。每月只送一個 PartSouq canary；若是 challenge，該 source 保持 `blocked`，後續 recovery 不再送第二個 canary。流程不做人工點擊、stealth 指紋偽裝、付費 solver、proxy、UA 輪替或 `cf_clearance` 搬運。
 
 ## Monthly orchestration
 
 ```text
 systemd timer (day 1 01:00 Asia/Taipei)
-          │ + hourly recovery checks through day 3
+          │ + 12-hour recovery checks through day 3
           ▼
 monthly_sync_runs (unique YYYY-MM lease + fencing)
           │
@@ -74,7 +73,8 @@ monthly_sync_runs (unique YYYY-MM lease + fencing)
 
 - 只有一個 owner 可持有當月 run；heartbeat 延長 15 分鐘 lease，stale owner 不能更新 source 或 log。
 - 子程序收到 SIGTERM 後有 30 秒收尾；超時才 kill。PartSouq queue 與 NHTSA content-addressed artifact 都可在下次 attempt 重用。
-- `completed` source 永不重跑；`failed`／`blocked` source 才續。第 3 次仍不完整時標為 `completed_with_gaps`，保留錯誤與全部事件。
+- NHTSA API 對 429、408 與暫時性 5xx 做最多 3 次低頻退避（至少 30／60／120 秒，並尊重更長的 `Retry-After`）；重試也計入 500-request safety budget。
+- `completed` source 永不重跑；NHTSA 的 `failed` source 可續跑；PartSouq `blocked` source 同月份直接 skip。若只剩 PartSouq blocked，立即封存為 `completed_with_gaps`，保留錯誤與全部事件。
 - Server hard reboot 後由 timer recovery schedule 重啟；相同月份與相同 child run key 確保冪等。
 
 ## Historical archive data flow
@@ -137,6 +137,7 @@ raw responses / archive captures     admin_override_heads
 - `expected_revision` + row lock 防止 lost update；衝突回 409。
 - CSRF、Strict session cookie、CSP、no-referrer、nosniff 都由 app 固定設定。
 - Raw response 不 inline render；raw HTML 只能明確下載。
+- `/monitoring` 唯讀聚合 `monthly_sync_runs/events`、`crawl_runs/queue` 與 `http_responses`，供站方查看 request、429、challenge、queue 與 heartbeat。
 
 ### 站方資料投影
 
@@ -147,7 +148,7 @@ PartSouq part name_en ──► part_term_mappings ──► 缺中文對帳案�
                                                │
                                                └─► raw JSON + SHA-256
                                                         │
-                                                        └─► VIN 車型
+                                                        └─► VIN 車型／Trim／引擎規格
                                                                │ 明確人工連結
                                                                ▼
                                                      PartSouq vehicle + fitments
@@ -166,6 +167,7 @@ PartSouq part name_en ──► part_term_mappings ──► 缺中文對帳案�
 - Dashboard：固定 2 次 SQL。
 - List：固定 3 次 SQL。第一個 query 只取當頁 key；後兩個 query 批次取得 source 與 manual records。
 - Detail：固定 4 次 SQL；audit 與 provenance fanout 各自最多 100 筆。
+- Monitoring：固定 3 次 SQL；最新 24 個月 run、50 個 crawl run、100 筆 event，先限制 recent run 再聚合 queue／response。
 - List 使用 signed-order keyset，不用 `OFFSET` 或每頁 `COUNT(*)`。
 - Prefix search 以每欄 index range 的 `UNION` 產生 source candidates；只有小型 overlay JSON 做 substring search。
 - 每條 SQL 都有 query tag 與 normalized fingerprint。測試用 1／100／10,000 筆及高 fanout fixture，要求 query count 與 fingerprint 不變。

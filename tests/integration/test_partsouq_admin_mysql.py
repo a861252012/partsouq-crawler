@@ -117,6 +117,13 @@ def test_mysql_admin_crud_audit_permissions_and_query_contract(
     assert search.headers["X-Admin-Query-Count"] == "3"
     assert b"ADMIN-E2E-001" in search.data
 
+    monitoring = client.get("/monitoring")
+    assert monitoring.status_code == 200
+    assert monitoring.headers["X-Admin-Query-Count"] == "3"
+    assert monitoring.headers["X-Admin-Query-Tags"] == (
+        "monitor.monthly-runs,monitor.crawl-runs,monitor.events"
+    )
+
     token = _csrf(client)
     created = client.post(
         "/entities/part_numbers/new",

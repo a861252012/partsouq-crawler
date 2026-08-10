@@ -320,6 +320,48 @@ class IngestService:
                 vehicle_id = vehicle_ids.get(vehicle_key)
                 if vehicle_id is None:
                     raise RuntimeError("vehicle insert could not be resolved")
+                vehicle_enrichment = (
+                    vehicle.brand_raw,
+                    vehicle.brand_normalized,
+                    vehicle.name_raw,
+                    vehicle.description_raw,
+                    vehicle.options_raw,
+                    vehicle.production_from,
+                    vehicle.production_to,
+                    vehicle.production_precision,
+                    vehicle.catalog_code,
+                )
+                await connection.execute(
+                    """
+                    UPDATE vehicle_configurations
+                    SET brand_raw = COALESCE(brand_raw, ?),
+                        brand_normalized = COALESCE(brand_normalized, ?),
+                        name_raw = COALESCE(name_raw, ?),
+                        description_raw = COALESCE(description_raw, ?),
+                        options_raw = COALESCE(options_raw, ?),
+                        production_from = COALESCE(production_from, ?),
+                        production_to = COALESCE(production_to, ?),
+                        production_precision = CASE
+                            WHEN production_precision IS NULL OR production_precision = 'unknown'
+                            THEN ? ELSE production_precision
+                        END,
+                        catalog_code = COALESCE(catalog_code, ?),
+                        updated_at = ?
+                    WHERE id = ? AND (
+                        (brand_raw IS NULL AND ? IS NOT NULL)
+                        OR (brand_normalized IS NULL AND ? IS NOT NULL)
+                        OR (name_raw IS NULL AND ? IS NOT NULL)
+                        OR (description_raw IS NULL AND ? IS NOT NULL)
+                        OR (options_raw IS NULL AND ? IS NOT NULL)
+                        OR (production_from IS NULL AND ? IS NOT NULL)
+                        OR (production_to IS NULL AND ? IS NOT NULL)
+                        OR ((production_precision IS NULL OR production_precision = 'unknown')
+                            AND ? <> 'unknown')
+                        OR (catalog_code IS NULL AND ? IS NOT NULL)
+                    )
+                    """,
+                    (*vehicle_enrichment, now, vehicle_id, *vehicle_enrichment),
+                )
                 provenance[
                     (
                         "vehicle_configuration",
@@ -444,10 +486,14 @@ class IngestService:
                     ),
                     keys=list(diagram_values),
                 )
+                diagram_enrichments: list[tuple[object, ...]] = []
                 for index, diagram in enumerate(parsed.diagrams):
                     diagram_id = selected.get(diagram_key_by_index[index])
                     if diagram_id is None:
                         raise RuntimeError("diagram insert could not be resolved")
+                    diagram_taxonomy_id = diagram_values[diagram_key_by_index[index]][1]
+                    if isinstance(diagram_taxonomy_id, int):
+                        diagram_enrichments.append((diagram_taxonomy_id, diagram_id))
                     diagram_ids[diagram.code_raw or f"id:{diagram_id}"] = diagram_id
                     if diagram.name_raw:
                         diagram_ids[f"name:{diagram.name_raw}"] = diagram_id
@@ -461,6 +507,15 @@ class IngestService:
                             source_url,
                         )
                     ] = None
+                if diagram_enrichments:
+                    await connection.executemany(
+                        """
+                        UPDATE diagrams
+                        SET taxonomy_node_id = COALESCE(taxonomy_node_id, ?)
+                        WHERE id = ?
+                        """,
+                        diagram_enrichments,
+                    )
 
             part_inputs: list[tuple[PartRecord, str | None]] = [
                 (part, parsed.vehicle.catalog_brand if parsed.vehicle else None)
@@ -520,10 +575,25 @@ class IngestService:
                 columns=("part_brand_raw", "number_raw"),
                 keys=list(part_values),
             )
+            part_enrichments: list[tuple[object, ...]] = []
             for key in part_values:
                 part_id = part_ids.get(key)
                 if part_id is None:
                     raise RuntimeError("part number insert could not be resolved")
+                values = part_values[key]
+                if values[3] is not None:
+                    part_enrichments.append(
+                        (
+                            values[3],
+                            values[4],
+                            values[5],
+                            now,
+                            part_id,
+                            values[3],
+                            values[4],
+                            values[5],
+                        )
+                    )
                 provenance[
                     (
                         "part_number",
@@ -534,6 +604,22 @@ class IngestService:
                         source_url,
                     )
                 ] = None
+            if part_enrichments:
+                await connection.executemany(
+                    """
+                    UPDATE part_numbers
+                    SET name_en_raw = COALESCE(name_en_raw, ?),
+                        is_assembly_inferred = GREATEST(is_assembly_inferred, ?),
+                        assembly_inference_reason = COALESCE(assembly_inference_reason, ?),
+                        updated_at = ?
+                    WHERE id = ? AND (
+                        (name_en_raw IS NULL AND ? IS NOT NULL)
+                        OR (is_assembly_inferred = 0 AND ? = 1)
+                        OR (assembly_inference_reason IS NULL AND ? IS NOT NULL)
+                    )
+                    """,
+                    part_enrichments,
+                )
 
             occurrence_values: dict[tuple[object, ...], tuple[object, ...]] = {}
             occurrence_key_by_index: dict[int, tuple[object, ...]] = {}
@@ -572,6 +658,56 @@ class IngestService:
                             source_url,
                         ),
                     )
+            occurrence_columns = (
+                "part_number_id",
+                "diagram_id",
+                "callout_raw",
+                "quantity_raw",
+                "part_range_raw",
+                "part_condition_raw",
+                "note_raw",
+                "source_url",
+            )
+            existing_occurrence_ids = await self._mysql_select_ids(
+                connection,
+                table="part_occurrences",
+                columns=occurrence_columns,
+                keys=list(occurrence_values),
+            )
+            null_condition_keys = [
+                (*key[:5], None, *key[6:])
+                for key in occurrence_values
+                if key[5] is not None and key not in existing_occurrence_ids
+            ]
+            null_condition_ids = await self._mysql_select_ids(
+                connection,
+                table="part_occurrences",
+                columns=occurrence_columns,
+                keys=null_condition_keys,
+            )
+            upgraded_occurrence_ids: set[int] = set()
+            occurrence_upgrades: list[tuple[object, ...]] = []
+            for key, values in occurrence_values.items():
+                if key[5] is None or key in existing_occurrence_ids:
+                    continue
+                old_id = null_condition_ids.get((*key[:5], None, *key[6:]))
+                if old_id is None or old_id in upgraded_occurrence_ids:
+                    continue
+                upgraded_occurrence_ids.add(old_id)
+                occurrence_upgrades.append((key[5], values[6], values[7], values[10], old_id))
+            if occurrence_upgrades:
+                await connection.executemany(
+                    """
+                    UPDATE IGNORE part_occurrences
+                    SET part_condition_raw = ?,
+                        part_from = COALESCE(part_from, ?),
+                        part_to = COALESCE(part_to, ?),
+                        row_metadata_json = ?
+                    WHERE id = ? AND part_condition_raw IS NULL
+                    """,
+                    occurrence_upgrades,
+                )
+
             inserted += await self._mysql_insert_many(
                 connection,
                 """
@@ -586,18 +722,25 @@ class IngestService:
             occurrence_ids = await self._mysql_select_ids(
                 connection,
                 table="part_occurrences",
-                columns=(
-                    "part_number_id",
-                    "diagram_id",
-                    "callout_raw",
-                    "quantity_raw",
-                    "part_range_raw",
-                    "part_condition_raw",
-                    "note_raw",
-                    "source_url",
-                ),
+                columns=occurrence_columns,
                 keys=list(occurrence_values),
             )
+            occurrence_enrichments: list[tuple[object, ...]] = []
+            for key, values in occurrence_values.items():
+                occurrence_id = occurrence_ids.get(key)
+                if occurrence_id is not None:
+                    occurrence_enrichments.append((values[6], values[7], values[10], occurrence_id))
+            if occurrence_enrichments:
+                await connection.executemany(
+                    """
+                    UPDATE part_occurrences
+                    SET part_from = COALESCE(part_from, ?),
+                        part_to = COALESCE(part_to, ?),
+                        row_metadata_json = ?
+                    WHERE id = ?
+                    """,
+                    occurrence_enrichments,
+                )
             for occurrence_id in occurrence_ids.values():
                 provenance[
                     (
@@ -652,7 +795,12 @@ class IngestService:
                 columns=("part_occurrence_id", "derivation"),
                 keys=list(fitment_values),
             )
-            for fitment_id in fitment_ids.values():
+            fitment_enrichments: list[tuple[object, ...]] = []
+            for key, values in fitment_values.items():
+                fitment_id = fitment_ids.get(key)
+                if fitment_id is None:
+                    continue
+                fitment_enrichments.append((values[7], values[8], fitment_id))
                 provenance[
                     (
                         "fitment",
@@ -663,6 +811,16 @@ class IngestService:
                         source_url,
                     )
                 ] = None
+            if fitment_enrichments:
+                await connection.executemany(
+                    """
+                    UPDATE fitments
+                    SET effective_from = COALESCE(effective_from, ?),
+                        effective_to = COALESCE(effective_to, ?)
+                    WHERE id = ?
+                    """,
+                    fitment_enrichments,
+                )
 
             hint_values: dict[tuple[object, ...], tuple[object, ...]] = {}
             for hint in parsed.compatibility_hints:
@@ -869,6 +1027,48 @@ class IngestService:
                 now,
             ),
         )
+        vehicle_enrichment = (
+            vehicle.brand_raw,
+            vehicle.brand_normalized,
+            vehicle.name_raw,
+            vehicle.description_raw,
+            vehicle.options_raw,
+            vehicle.production_from,
+            vehicle.production_to,
+            vehicle.production_precision,
+            vehicle.catalog_code,
+        )
+        await connection.execute(
+            """
+            UPDATE vehicle_configurations
+            SET brand_raw = COALESCE(brand_raw, ?),
+                brand_normalized = COALESCE(brand_normalized, ?),
+                name_raw = COALESCE(name_raw, ?),
+                description_raw = COALESCE(description_raw, ?),
+                options_raw = COALESCE(options_raw, ?),
+                production_from = COALESCE(production_from, ?),
+                production_to = COALESCE(production_to, ?),
+                production_precision = CASE
+                    WHEN production_precision IS NULL OR production_precision = 'unknown'
+                    THEN ? ELSE production_precision
+                END,
+                catalog_code = COALESCE(catalog_code, ?),
+                updated_at = ?
+            WHERE id = ? AND (
+                (brand_raw IS NULL AND ? IS NOT NULL)
+                OR (brand_normalized IS NULL AND ? IS NOT NULL)
+                OR (name_raw IS NULL AND ? IS NOT NULL)
+                OR (description_raw IS NULL AND ? IS NOT NULL)
+                OR (options_raw IS NULL AND ? IS NOT NULL)
+                OR (production_from IS NULL AND ? IS NOT NULL)
+                OR (production_to IS NULL AND ? IS NOT NULL)
+                OR ((production_precision IS NULL OR production_precision = 'unknown')
+                    AND ? <> 'unknown')
+                OR (catalog_code IS NULL AND ? IS NOT NULL)
+            )
+            """,
+            (*vehicle_enrichment, now, row_id, *vehicle_enrichment),
+        )
         await self._source(connection, "vehicle_configuration", row_id, response_id, source_url)
         return row_id, created
 
@@ -946,6 +1146,15 @@ class IngestService:
                 source_url,
             ),
         )
+        if taxonomy_id is not None:
+            await connection.execute(
+                """
+                UPDATE diagrams
+                SET taxonomy_node_id = COALESCE(taxonomy_node_id, ?)
+                WHERE id = ?
+                """,
+                (taxonomy_id, row_id),
+            )
         await self._source(connection, "diagram", row_id, response_id, source_url)
         return row_id, created
 
@@ -988,6 +1197,31 @@ class IngestService:
                 now,
             ),
         )
+        if part.name_en_raw is not None:
+            await connection.execute(
+                """
+                UPDATE part_numbers
+                SET name_en_raw = COALESCE(name_en_raw, ?),
+                    is_assembly_inferred = MAX(is_assembly_inferred, ?),
+                    assembly_inference_reason = COALESCE(assembly_inference_reason, ?),
+                    updated_at = ?
+                WHERE id = ? AND (
+                    (name_en_raw IS NULL AND ? IS NOT NULL)
+                    OR (is_assembly_inferred = 0 AND ? = 1)
+                    OR (assembly_inference_reason IS NULL AND ? IS NOT NULL)
+                )
+                """,
+                (
+                    part.name_en_raw,
+                    assembly,
+                    reason,
+                    now,
+                    row_id,
+                    part.name_en_raw,
+                    assembly,
+                    reason,
+                ),
+            )
         await self._source(connection, "part_number", row_id, response_id, source_url)
         return row_id, created
 
@@ -1002,6 +1236,32 @@ class IngestService:
         source_url: str,
         response_id: int,
     ) -> tuple[int, int]:
+        if part.condition_raw is not None:
+            await connection.execute(
+                """
+                UPDATE OR IGNORE part_occurrences
+                SET part_condition_raw = ?,
+                    part_from = COALESCE(part_from, ?),
+                    part_to = COALESCE(part_to, ?),
+                    row_metadata_json = ?
+                WHERE part_number_id = ? AND diagram_id = ? AND callout_raw IS ?
+                  AND quantity_raw IS ? AND part_range_raw IS ?
+                  AND part_condition_raw IS NULL AND note_raw IS ? AND source_url = ?
+                """,
+                (
+                    part.condition_raw,
+                    part.part_from,
+                    part.part_to,
+                    json.dumps(part.row_metadata, sort_keys=True),
+                    part_id,
+                    diagram_id,
+                    part.callout_raw,
+                    part.quantity_raw,
+                    part.part_range_raw,
+                    part.note_raw,
+                    source_url,
+                ),
+            )
         row_id, created = await self._get_or_create(
             connection,
             select_sql="""
@@ -1040,6 +1300,21 @@ class IngestService:
                 part.note_raw,
                 json.dumps(part.row_metadata, sort_keys=True),
                 source_url,
+            ),
+        )
+        await connection.execute(
+            """
+            UPDATE part_occurrences
+            SET part_from = COALESCE(part_from, ?),
+                part_to = COALESCE(part_to, ?),
+                row_metadata_json = ?
+            WHERE id = ?
+            """,
+            (
+                part.part_from,
+                part.part_to,
+                json.dumps(part.row_metadata, sort_keys=True),
+                row_id,
             ),
         )
         await self._source(connection, "part_occurrence", row_id, response_id, source_url)
@@ -1082,6 +1357,15 @@ class IngestService:
                 part.part_to,
                 source_url,
             ),
+        )
+        await connection.execute(
+            """
+            UPDATE fitments
+            SET effective_from = COALESCE(effective_from, ?),
+                effective_to = COALESCE(effective_to, ?)
+            WHERE id = ?
+            """,
+            (part.part_from, part.part_to, row_id),
         )
         await self._source(connection, "fitment", row_id, response_id, source_url)
         return row_id, created

@@ -13,14 +13,35 @@ import aiohttp
 import certifi
 
 from partsouq_crawler.crawl.rate_limit import HostRateLimiter
+from partsouq_crawler.crawl.retries import retry_delay
 from partsouq_crawler.nhtsa.api import NhtsaApiPolicy
 from partsouq_crawler.nhtsa.config import NhtsaConfig
 from partsouq_crawler.nhtsa.datasets import ApiSource
 from partsouq_crawler.nhtsa.models import DownloadedArtifact
 
+TRANSIENT_HTTP_STATUSES = {408, 429, 500, 502, 503, 504}
+NHTSA_API_MAX_TRANSIENT_RETRIES = 3
+NHTSA_API_MIN_RETRY_SECONDS = 30.0
+
 
 class NhtsaApiError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool = False,
+        status: int | None = None,
+        retry_after: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+        self.status = status
+        self.retry_after = retry_after
+
+
+def nhtsa_transient_retry_delay(retry_number: int, retry_after: str | None = None) -> float:
+    minimum = NHTSA_API_MIN_RETRY_SECONDS * float(2 ** max(0, retry_number - 1))
+    return float(max(minimum, retry_delay(retry_number, retry_after)))
 
 
 class NhtsaApiClient:
@@ -84,13 +105,19 @@ class NhtsaApiClient:
                     )
                 if response.status != 200:
                     raise NhtsaApiError(
-                        f"{source.key} returned HTTP {response.status} from {source.url}"
+                        f"{source.key} returned HTTP {response.status} from {source.url}",
+                        retryable=response.status in TRANSIENT_HTTP_STATUSES,
+                        status=response.status,
+                        retry_after=response_headers.get("retry-after"),
                     )
                 body = await response.read()
                 if not body:
                     raise NhtsaApiError(f"{source.key} returned an empty response")
         except (aiohttp.ClientError, TimeoutError) as error:
-            raise NhtsaApiError(f"failed to request {source.key}: {error}") from error
+            raise NhtsaApiError(
+                f"failed to request {source.key}: {error}",
+                retryable=True,
+            ) from error
 
         sha256 = hashlib.sha256(body).hexdigest()
         target_dir = self.config.raw_dir / source.dataset_name

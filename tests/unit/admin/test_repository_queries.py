@@ -118,3 +118,17 @@ def test_admin_views_redact_sensitive_source_urls() -> None:
     assert detail.record.source_payload is not None
     assert detail.record.source_payload["source_url"].endswith("ssd=[REDACTED]")
     assert detail.provenance[0]["source_url"].endswith("ssd=[REDACTED]")
+
+
+def test_crawl_monitoring_query_shape_is_fixed() -> None:
+    trace = QueryTrace()
+    monitor = AdminRepository(ScriptedDatabase(trace)).crawl_monitoring()
+
+    assert trace.count == 3
+    assert trace.tags == (
+        "monitor.monthly-runs",
+        "monitor.crawl-runs",
+        "monitor.events",
+    )
+    assert monitor["monthly_runs"][0]["period_key"] == "2099-01"
+    assert monitor["crawl_runs"][0]["responses"] == 10

@@ -37,6 +37,31 @@ def test_list_route_reports_fixed_three_query_budget() -> None:
     assert databases[-1].closed
 
 
+def test_monitoring_route_uses_three_fixed_queries_and_shows_request_state() -> None:
+    databases: list[ScriptedDatabase] = []
+
+    def factory(_config: AdminConfig, trace: QueryTrace) -> ScriptedDatabase:
+        database = ScriptedDatabase(trace)
+        databases.append(database)
+        return database
+
+    app = create_app(AdminConfig(secret_key="test-secret"), database_factory=factory)
+    app.testing = True
+
+    response = app.test_client().get("/monitoring")
+
+    assert response.status_code == 200
+    assert response.headers["X-Admin-Query-Count"] == "3"
+    assert response.headers["X-Admin-Query-Tags"].split(",") == [
+        "monitor.monthly-runs",
+        "monitor.crawl-runs",
+        "monitor.events",
+    ]
+    assert b"monthly-2099-01-partsouq" in response.data
+    assert b"crawl_policy" in response.data
+    assert databases[-1].closed
+
+
 def test_create_requires_csrf_and_appends_audit_event() -> None:
     databases: list[ScriptedDatabase] = []
 

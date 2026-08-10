@@ -13,7 +13,7 @@ import pytest
 from partsouq_crawler.config import PartSouqMySQLConfig
 from partsouq_crawler.db.repository import LeaseLostError, Repository
 from partsouq_crawler.models.crawl import FetchResult
-from partsouq_crawler.models.records import ParsedPage, PartRecord
+from partsouq_crawler.models.records import ParsedPage, PartRecord, VehicleRecord
 from partsouq_crawler.services.ingest import IngestService
 from partsouq_crawler.services.monthly_sync import MonthlySourceCommand, MonthlySyncService
 
@@ -120,6 +120,101 @@ def test_mysql_bulk_ingest_is_idempotent_and_keeps_provenance() -> None:
             assert not await repository.foreign_key_violations()
             status = await repository.db_status()
             assert int(status["database_bytes"]) >= int(status["compressed_bytes"])
+        finally:
+            await repository.close()
+
+    asyncio.run(scenario())
+
+
+def test_mysql_reparse_enriches_vehicle_years_without_duplicate() -> None:
+    async def scenario() -> None:
+        repository = await Repository.create_mysql(_config())
+        run_key = f"mysql-vehicle-{uuid.uuid4().hex}"
+        source_url = f"https://example.invalid/{run_key}"
+        try:
+            run_id = await repository.create_or_get_run(run_key, [], {})
+            response_id, _ = await repository.store_response(
+                run_id,
+                None,
+                FetchResult(
+                    requested_url=source_url,
+                    final_url=source_url,
+                    status=200,
+                    headers={"Content-Type": "text/html"},
+                    body=b"<html></html>",
+                    elapsed_ms=1,
+                    attempt=1,
+                ),
+                challenged=False,
+                challenge_reason=None,
+            )
+            service = IngestService(repository)
+            base_vehicle = VehicleRecord(
+                catalog_brand="HONDA",
+                brand_raw="HONDA",
+                name_raw="INTEGRA",
+                model_raw="17ST701",
+                prod_period_raw="1998-2000",
+                production_precision="unknown",
+            )
+            enriched_vehicle = VehicleRecord(
+                catalog_brand="HONDA",
+                brand_raw="HONDA",
+                name_raw="INTEGRA",
+                model_raw="17ST701",
+                prod_period_raw="1998-2000",
+                production_from="1998",
+                production_to="2000",
+                production_precision="year",
+            )
+
+            first = await service.ingest(
+                run_id=run_id,
+                response_id=response_id,
+                source_url=source_url,
+                parsed=ParsedPage(page_type="vehicle", vehicle=base_vehicle),
+            )
+            second = await service.ingest(
+                run_id=run_id,
+                response_id=response_id,
+                source_url=source_url,
+                parsed=ParsedPage(page_type="vehicle", vehicle=enriched_vehicle),
+            )
+            cursor = await repository.connection.execute(
+                """
+                SELECT COUNT(*) AS row_count, MAX(production_from) AS production_from,
+                       MAX(production_to) AS production_to,
+                       MAX(production_precision) AS production_precision,
+                       MAX(updated_at) AS updated_at
+                FROM vehicle_configurations WHERE source_url = ?
+                """,
+                (source_url,),
+            )
+            row = await cursor.fetchone()
+            assert row is not None
+            enriched_at = row["updated_at"]
+            await asyncio.sleep(0.01)
+            third = await service.ingest(
+                run_id=run_id,
+                response_id=response_id,
+                source_url=source_url,
+                parsed=ParsedPage(page_type="vehicle", vehicle=enriched_vehicle),
+            )
+            stable_cursor = await repository.connection.execute(
+                "SELECT updated_at FROM vehicle_configurations WHERE source_url = ?",
+                (source_url,),
+            )
+            stable_row = await stable_cursor.fetchone()
+
+            assert first == 1
+            assert second == 0
+            assert third == 0
+            assert row["row_count"] == 1
+            assert row["production_from"] == "1998"
+            assert row["production_to"] == "2000"
+            assert row["production_precision"] == "year"
+            assert stable_row is not None
+            assert stable_row["updated_at"] == enriched_at
         finally:
             await repository.close()
 

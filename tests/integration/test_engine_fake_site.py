@@ -224,17 +224,29 @@ def test_http_500_retries_then_completes(tmp_path: Path, monkeypatch) -> None:
 
 def test_http_429_pauses_and_respects_retry_after(tmp_path: Path) -> None:
     async def scenario() -> None:
+        requests = 0
+
         async def handler(request: web.Request) -> web.Response:
+            nonlocal requests
             if request.path == "/robots.txt":
                 return robots_response()
+            requests += 1
             return web.Response(status=429, text="slow down", headers={"Retry-After": "0"})
 
+        database = tmp_path / "rate.sqlite3"
         async with fake_site(handler) as base:
-            code, status = await crawl_fake(tmp_path / "rate.sqlite3", f"{base}/")
+            code, status = await crawl_fake(database, f"{base}/")
+            resumed_code, resumed = await asyncio.wait_for(
+                crawl_fake(database, f"{base}/"),
+                timeout=1,
+            )
         assert code == 0
         assert status["status"] == "paused"
         assert status["queue"]["pending"] == 1
         assert status["strict_complete"] is False
+        assert resumed_code == 0
+        assert resumed["status"] == "paused"
+        assert requests == 1
 
     asyncio.run(scenario())
 
@@ -305,21 +317,24 @@ def test_nested_and_gzip_sitemaps_discover_catalog(tmp_path: Path) -> None:
 def test_sigint_pauses_then_resume_completes(tmp_path: Path) -> None:
     async def scenario() -> None:
         requests: Counter[str] = Counter()
+        signal_sent = False
 
         async def handler(request: web.Request) -> web.Response:
+            nonlocal signal_sent
             requests[request.path] += 1
             if request.path == "/robots.txt":
                 return robots_response()
             if request.path == "/":
                 links = "".join(f'<a href="/p/{index}">{index}</a>' for index in range(100))
                 return web.Response(text=links, content_type="text/html")
+            if not signal_sent:
+                signal_sent = True
+                asyncio.get_running_loop().call_soon(os.kill, os.getpid(), signal.SIGINT)
             await asyncio.sleep(0.01)
             return web.Response(text="page", content_type="text/html")
 
         database = tmp_path / "signal.sqlite3"
         async with fake_site(handler) as base:
-            loop = asyncio.get_running_loop()
-            loop.call_later(0.05, os.kill, os.getpid(), signal.SIGINT)
             first_code, first = await crawl_fake(database, f"{base}/", run_key="signal")
             assert first_code == 0 and first["status"] == "paused"
             assert first["queue"]["pending"] > 0

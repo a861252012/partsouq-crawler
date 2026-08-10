@@ -158,7 +158,10 @@ class NhtsaBulkSyncService:
                     )
                     active_artifact_id = None
 
-            self.repository.publish_artifacts(publishable)
+            self.repository.publish_artifacts(
+                publishable,
+                replace_datasets=tuple(dict.fromkeys(source.dataset_name for source in sources)),
+            )
             self.repository.finish_run(
                 run_id,
                 status="completed",

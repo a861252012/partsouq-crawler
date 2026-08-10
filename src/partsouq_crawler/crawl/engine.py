@@ -13,7 +13,7 @@ from partsouq_crawler.config import CrawlerConfig
 from partsouq_crawler.crawl.challenge import detect_challenge
 from partsouq_crawler.crawl.discovery import is_in_scope, normalize_url
 from partsouq_crawler.crawl.fetcher import FetchError
-from partsouq_crawler.crawl.retries import RETRYABLE_STATUS, retry_delay
+from partsouq_crawler.crawl.retries import RETRYABLE_STATUS, rate_limit_delay, retry_delay
 from partsouq_crawler.crawl.robots import RobotsRules, parse_robots
 from partsouq_crawler.crawl.sitemap import parse_sitemap
 from partsouq_crawler.crawl.transport import FetchTransport, create_fetch_transport
@@ -21,7 +21,7 @@ from partsouq_crawler.db.repository import LeaseLostError, Repository
 from partsouq_crawler.logging import CrawlLogger
 from partsouq_crawler.models.crawl import FetchResult, QueueItem
 from partsouq_crawler.parsers.base import CatalogParser, ParseError
-from partsouq_crawler.services.archive_queue import redact_sensitive_url
+from partsouq_crawler.services.archive_queue import redact_error, redact_sensitive_url
 from partsouq_crawler.services.ingest import IngestService
 
 
@@ -60,6 +60,15 @@ class CrawlerEngine:
         )
         await self.repository.recover_expired_leases(self.run_id)
         await self.repository.set_run_status(self.run_id, "running")
+        self.logger.event(
+            "crawl_policy",
+            run_id=self.run_key,
+            concurrency=self.config.concurrency,
+            delay_seconds=self.config.delay_seconds,
+            max_retries=self.config.max_retries,
+            robots_policy=self.config.robots_policy,
+            transport=self.config.transport,
+        )
         self._install_signal_handlers()
         async with create_fetch_transport(self.config) as fetcher:
             user_agent = fetcher.user_agent
@@ -153,9 +162,20 @@ class CrawlerEngine:
             if item is None:
                 await self._unreserve_page()
                 counts = await self.repository.queue_counts(self.run_id)
-                if not self.stop_event.is_set() and (
-                    counts["pending"] > 0 or counts["in_progress"] > 0
-                ):
+                if self.stop_event.is_set():
+                    return
+                if counts["in_progress"] > 0:
+                    await asyncio.sleep(0.01)
+                    continue
+                if counts["pending"] > 0:
+                    runnable = await self.repository.runnable_queue_count(
+                        self.run_id,
+                        max_depth=self.config.max_depth,
+                    )
+                    if runnable == 0:
+                        await self.repository.set_run_status(self.run_id, "paused")
+                        self.stop_event.set()
+                        return
                     await asyncio.sleep(0.01)
                     continue
                 return
@@ -247,14 +267,38 @@ class CrawlerEngine:
             try:
                 result = await fetcher.fetch_once(item.requested_url, attempt=attempt)
             except FetchError as error:
-                last_error = str(error)
+                last_error = redact_error(error, item.requested_url)
                 if attempt <= self.config.max_retries:
-                    await asyncio.sleep(retry_delay(attempt))
+                    delay = retry_delay(attempt)
+                    self.logger.event(
+                        "request_retry_scheduled",
+                        run_id=self.run_key,
+                        queue_id=item.id,
+                        url=redact_sensitive_url(item.requested_url),
+                        status="transport_error",
+                        attempt=attempt,
+                        delay_seconds=round(delay, 3),
+                        error=last_error,
+                    )
+                    await asyncio.sleep(delay)
                     continue
                 await self._finish_item(item, "failed", error=last_error)
+                self.logger.event(
+                    "request_retry_exhausted",
+                    run_id=self.run_key,
+                    queue_id=item.id,
+                    url=redact_sensitive_url(item.requested_url),
+                    status="failed",
+                    attempt=attempt,
+                    error=last_error,
+                )
                 return
 
             decision = detect_challenge(result.status, result.headers, result.body)
+            retry_after = next(
+                (value for key, value in result.headers.items() if key.casefold() == "retry-after"),
+                None,
+            )
             response_id, _ = await self.repository.store_response(
                 self.run_id,
                 item.id,
@@ -283,16 +327,43 @@ class CrawlerEngine:
                 )
                 self.blocked_event.set()
                 self.stop_event.set()
+                self.logger.event(
+                    "challenge_circuit_breaker_open",
+                    run_id=self.run_key,
+                    queue_id=item.id,
+                    url=redact_sensitive_url(item.requested_url),
+                    status="blocked",
+                    attempt=attempt,
+                    reason=decision.reason,
+                )
                 return
             if result.status in RETRYABLE_STATUS:
                 last_error = f"HTTP {result.status}"
                 if attempt <= self.config.max_retries:
-                    await asyncio.sleep(retry_delay(attempt, result.headers.get("Retry-After")))
+                    delay = retry_delay(attempt, retry_after)
+                    self.logger.event(
+                        "request_retry_scheduled",
+                        run_id=self.run_key,
+                        queue_id=item.id,
+                        url=redact_sensitive_url(item.requested_url),
+                        status=result.status,
+                        attempt=attempt,
+                        delay_seconds=round(delay, 3),
+                    )
+                    await asyncio.sleep(delay)
                     continue
                 await self._finish_item(item, "failed", error=last_error)
+                self.logger.event(
+                    "request_retry_exhausted",
+                    run_id=self.run_key,
+                    queue_id=item.id,
+                    url=redact_sensitive_url(item.requested_url),
+                    status=result.status,
+                    attempt=attempt,
+                )
                 return
             if result.status == 429:
-                delay = retry_delay(attempt, result.headers.get("Retry-After"))
+                delay = rate_limit_delay(attempt, retry_after)
                 next_attempt = (datetime.now(UTC) + timedelta(seconds=delay)).isoformat()
                 await self._finish_item(
                     item,
@@ -302,6 +373,16 @@ class CrawlerEngine:
                 )
                 await self.repository.set_run_status(self.run_id, "paused")
                 self.stop_event.set()
+                self.logger.event(
+                    "source_rate_limited",
+                    run_id=self.run_key,
+                    queue_id=item.id,
+                    url=redact_sensitive_url(item.requested_url),
+                    status="paused",
+                    attempt=attempt,
+                    delay_seconds=round(delay, 3),
+                    retry_after_present=retry_after is not None,
+                )
                 return
             if result.status in {404, 410}:
                 await self._finish_item(item, "gone")

@@ -58,6 +58,7 @@ def _config(tmp_path: Path) -> NhtsaConfig:
         raw_dir=tmp_path / "raw",
         user_agent="nhtsa-test/1.0",
         request_timeout_seconds=10,
+        api_delay_seconds=0,
     )
 
 
@@ -66,6 +67,7 @@ def test_bulk_sync_is_real_provenanced_and_idempotent(tmp_path: Path) -> None:
         payloads = {
             "/pre.zip": _zip("pre.txt", [_row("1", "10V000001")]),
             "/post.zip": _zip("post.txt", [_row("2", "20V000002")]),
+            "/current.zip": _zip("current.txt", [_row("3", "30V000003")]),
         }
 
         async def handler(request: web.Request) -> web.Response:
@@ -119,6 +121,23 @@ def test_bulk_sync_is_real_provenanced_and_idempotent(tmp_path: Path) -> None:
                 assert second["artifacts_downloaded"] == 0
                 assert second["artifacts_reused"] == 2
                 assert repository.status_report()["current_record_counts"] == {"recalls": 2}
+
+                current_window = BulkSource(
+                    "test_current_window",
+                    "recalls",
+                    f"{base_url}/current.zip",
+                    "current.txt",
+                )
+                third = await service.run(
+                    run_key="fixture-sync-new-window",
+                    scope_name="recalls",
+                    sources=(current_window,),
+                )
+                assert third["status"] == "completed"
+                assert repository.status_report()["current_record_counts"] == {"recalls": 1}
+                assert [
+                    row["source_key"] for row in repository.status_report()["current_artifacts"]
+                ] == ["test_current_window"]
             finally:
                 repository.clear_for_tests()
                 repository.close()

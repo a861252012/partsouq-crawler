@@ -1,0 +1,850 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "NHTSA／PartSouq 資料管線、站方後台與 E2E 最終報告",
+    "description": "截至 2026-08-10 的 production MySQL、NHTSA 官方同步、PartSouq 歷史封存與 live blocker、站方後台、月排程及完整 E2E。",
+    "generatedAt": "2026-08-10T21:24:36+08:00",
+    "cards": [
+      {
+        "id": "live_records_card",
+        "dataset": "headline_metrics",
+        "sourceId": "partsouq_live_status",
+        "description": "PartSouq verified current fitments；Cloudflare challenge 後保持 0。",
+        "metrics": [
+          {
+            "label": "Live current fitments",
+            "field": "live_current_records",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "historical_fitments_card",
+        "dataset": "headline_metrics",
+        "sourceId": "partsouq_counts",
+        "description": "MySQL 內歷史 fitments；全部 is_verified=0。",
+        "metrics": [
+          {
+            "label": "歷史 fitments",
+            "field": "historical_fitments",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "nhtsa_rows_card",
+        "dataset": "headline_metrics",
+        "sourceId": "nhtsa_published_rows",
+        "description": "457 個 NHTSA current artifacts 的 source_rows 合計。",
+        "metrics": [
+          {
+            "label": "NHTSA current rows",
+            "field": "nhtsa_published_rows",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "part_numbers_card",
+        "dataset": "headline_metrics",
+        "sourceId": "partsouq_counts",
+        "description": "PartSouq 歷史資料正規化後的零件號碼筆數。",
+        "metrics": [
+          {
+            "label": "Part numbers",
+            "field": "part_numbers",
+            "format": "number"
+          }
+        ]
+      }
+    ],
+    "charts": [
+      {
+        "id": "partsouq_entities_chart",
+        "title": "PartSouq 歷史正規化資料列數",
+        "subtitle": "Production MySQL snapshot；全部 historical、is_verified=0，不代表 live current",
+        "type": "horizontalBar",
+        "intent": "comparison",
+        "question": "目前歷史型錄各正規化實體有多少資料？",
+        "rationale": "類別名稱較長，使用橫向長條並從零比較絕對筆數。",
+        "dataset": "partsouq_entities",
+        "sourceId": "partsouq_counts",
+        "encodings": {
+          "x": {
+            "field": "entity",
+            "type": "nominal",
+            "label": "資料實體"
+          },
+          "y": {
+            "field": "row_count",
+            "type": "quantitative",
+            "format": "number",
+            "label": "筆數"
+          },
+          "label": {
+            "field": "row_count",
+            "type": "quantitative",
+            "format": "number"
+          },
+          "tooltip": [
+            {
+              "field": "scope",
+              "type": "text",
+              "label": "資料範圍"
+            },
+            {
+              "field": "verification",
+              "type": "text",
+              "label": "驗證狀態"
+            }
+          ]
+        },
+        "valueFormat": "number",
+        "layout": "full",
+        "palette": {
+          "kind": "sequential",
+          "name": "blue"
+        },
+        "settings": {
+          "sort": "descending",
+          "showValues": true
+        },
+        "surface": {
+          "surface": "export",
+          "viewMode": "both"
+        }
+      },
+      {
+        "id": "archive_queue_chart",
+        "title": "歷史封存 queue 終止狀態",
+        "subtitle": "Common Crawl 3,165；Wayback 23,295；全部 terminal，仍有 96 HTTP error 與 1 parse gap",
+        "type": "horizontalStackedBar",
+        "intent": "composition",
+        "question": "兩個歷史來源的終止結果如何組成？",
+        "rationale": "同一來源的終止狀態可加總成 selected total，使用堆疊長條。",
+        "dataset": "archive_queue",
+        "sourceId": "archive_queue_status",
+        "encodings": {
+          "x": {
+            "field": "archive_source",
+            "type": "nominal",
+            "label": "封存來源"
+          },
+          "y": {
+            "fields": [
+              "done",
+              "challenged",
+              "http_error",
+              "parse_failed"
+            ],
+            "type": "quantitative",
+            "format": "number",
+            "label": "Queue items"
+          },
+          "tooltip": [
+            {
+              "field": "terminal_total",
+              "type": "quantitative",
+              "format": "number",
+              "label": "Terminal total"
+            },
+            {
+              "field": "coverage_note",
+              "type": "text",
+              "label": "範圍"
+            }
+          ]
+        },
+        "valueFormat": "number",
+        "layout": "full",
+        "palette": {
+          "kind": "categorical",
+          "name": "blue-orange-olive-pink"
+        },
+        "settings": {
+          "groupMode": "stacked",
+          "showValues": true
+        },
+        "surface": {
+          "surface": "export",
+          "viewMode": "both"
+        }
+      },
+      {
+        "id": "nhtsa_datasets_chart",
+        "title": "NHTSA current artifacts 的 published source rows",
+        "subtitle": "12 datasets；457 current artifacts；9,876,638 source rows；rejected=0",
+        "type": "horizontalBar",
+        "intent": "comparison",
+        "question": "NHTSA current publication 的資料量由哪些 datasets 組成？",
+        "rationale": "12 個長名稱類別需要橫向長條；長條從零比較絕對筆數。",
+        "dataset": "nhtsa_datasets",
+        "sourceId": "nhtsa_published_rows",
+        "encodings": {
+          "x": {
+            "field": "dataset_label",
+            "type": "nominal",
+            "label": "Dataset"
+          },
+          "y": {
+            "field": "published_source_rows",
+            "type": "quantitative",
+            "format": "number",
+            "label": "Published source rows"
+          },
+          "label": {
+            "field": "published_source_rows",
+            "type": "quantitative",
+            "format": "number"
+          },
+          "tooltip": [
+            {
+              "field": "dataset_name",
+              "type": "text",
+              "label": "Canonical name"
+            },
+            {
+              "field": "count_definition",
+              "type": "text",
+              "label": "定義"
+            }
+          ]
+        },
+        "valueFormat": "number",
+        "layout": "full",
+        "palette": {
+          "kind": "sequential",
+          "name": "blue"
+        },
+        "settings": {
+          "sort": "descending",
+          "showValues": true
+        },
+        "surface": {
+          "surface": "export",
+          "viewMode": "both"
+        }
+      }
+    ],
+    "tables": [],
+    "sources": [
+      {
+        "id": "partsouq_counts",
+        "label": "PartSouq MySQL counts"
+      },
+      {
+        "id": "archive_queue_status",
+        "label": "PartSouq archive queue status"
+      },
+      {
+        "id": "partsouq_live_status",
+        "label": "PartSouq live run status"
+      },
+      {
+        "id": "nhtsa_published_rows",
+        "label": "NHTSA current artifact publication"
+      },
+      {
+        "id": "test_suite",
+        "label": "Full pytest and coverage run"
+      },
+      {
+        "id": "acceptance_evidence",
+        "label": "Acceptance E2E evidence ledger"
+      }
+    ],
+    "blocks": [
+      {
+        "id": "report_title",
+        "type": "markdown",
+        "layout": "full",
+        "body": "# NHTSA／PartSouq 資料管線、站方後台與 E2E 最終報告"
+      },
+      {
+        "id": "executive_summary",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## 技術摘要\n\n**整體判定：部分完成。** NHTSA 官方 bulk/API、PartSouq 歷史 archive、MySQL、站方 CRUD／對帳、月排程、raw/provenance、package 與 E2E 已完成。PartSouq 標準 Playwright live canary 仍收到 Cloudflare 403 challenge，所以 current/live 全量未完成；165,686 是歷史 fitment，不是今日全站。"
+      },
+      {
+        "id": "headline_metrics_block",
+        "type": "metric-strip",
+        "layout": "full",
+        "cardIds": [
+          "live_records_card",
+          "historical_fitments_card",
+          "nhtsa_rows_card",
+          "part_numbers_card"
+        ]
+      },
+      {
+        "id": "key_findings",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## 關鍵結論\n\n1. NHTSA current publication：457 artifacts、12 datasets、9,876,638 source rows、0 rejected。\n2. PartSouq 歷史資料：52,102 part numbers、165,686 fitments；全部 `is_verified=0`。\n3. PartSouq live current：標準 Playwright 403 challenge，verified current fitments 為 0。\n4. 23,709 raw bodies 與 457 NHTSA artifacts 已逐檔／逐 body 驗 SHA、size 與 rows，0 mismatch。\n5. 最終完整 suite：148 passed、82% coverage、0 warning。"
+      },
+      {
+        "id": "partsouq_section",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## PartSouq 歷史資料\n\n下圖只顯示歷史封存解析後的 normalized entities。完整來源歷程保留在 `record_sources`；export 每個 normalized record 只選最新版 parser 的一筆 provenance，避免跨版本 replay 造成重複。"
+      },
+      {
+        "id": "partsouq_entities_block",
+        "type": "chart",
+        "layout": "full",
+        "chartId": "partsouq_entities_chart"
+      },
+      {
+        "id": "archive_section",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## 歷史封存 Queue\n\nCommon Crawl 與 Wayback 的 26,460 個 selected items 都已 terminal。這只代表本次 index 已跑完；96 HTTP error 與 1 個無 Part Number 的 capture 仍是明確 gap。"
+      },
+      {
+        "id": "archive_queue_block",
+        "type": "chart",
+        "layout": "full",
+        "chartId": "archive_queue_chart"
+      },
+      {
+        "id": "nhtsa_section",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## NHTSA Current Publication\n\n457 個 current artifacts 全部逐檔驗證存在、bytes、SHA-256、persisted rows 與 rejection。總計 538,835,256 bytes，0 mismatch。"
+      },
+      {
+        "id": "nhtsa_chart_block",
+        "type": "chart",
+        "layout": "full",
+        "chartId": "nhtsa_datasets_chart"
+      },
+      {
+        "id": "goals_section",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## 需求真值\n\n- **完成：** NHTSA 官方資料、PartSouq MySQL／歷史 archive／normalized、persistent queue、raw/provenance、站方 CRUD／對帳、月排程、package、文件與測試。\n- **附帶 gap：** Archive 全 terminal，但仍有 96 HTTP error 與 1 parse gap。\n- **阻擋：** PartSouq live current 全量；標準 Playwright 403 challenge，`strict_complete=false`。\n- **待外部條件：** 實際 Linux production host、站方中文詞彙、合法 VIN 輸入。"
+      },
+      {
+        "id": "e2e_section",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## 完整自測與 E2E\n\n- **148 passed in 8.35s；82% statement coverage；warning-as-error。**\n- NHTSA bulk/API 正式 run completed，503／timeout 依 30／60 秒退避後恢復。\n- NHTSA 457 artifacts：538,835,256 bytes，SHA／size／rows 0 mismatch。\n- PartSouq 23,709 bodies：4,858,808,157 restored bytes，0 mismatch。\n- PartSouq export：165,686 JSONL rows、179,258,045 bytes、0 sensitive URL leak。\n- Admin：root／health／monitoring 與 10 entity lists 全 200；list／monitor 固定 3 queries。\n- DB：missing provenance 0、orphan 0、FK 0、所有實體表 CHECK TABLE OK。\n- Package：offline wheel／sdist、clean venv、CLI 與 resources 通過。"
+      },
+      {
+        "id": "limitations_section",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## 注意事項與限制\n\n- **歷史不等於現行。** 165,686 fitments 全部 historical、`is_verified=0`。\n- **Challenge HTML 不是型錄。** 只保存 raw evidence，不進 parser。\n- **中文與 VIN 是 business input gap。** 目前 51,529 個對帳 case，production VIN queue=0。\n- **Production server 未驗收。** 沒有目標 Linux host，systemd timer 尚未現場安裝。\n- **後台目前是 loopback 工具。** 對外前需 auth、TLS、reverse proxy 與正式 WSGI。\n- **GitHub 只能使用 `a861252012`。** 禁止工作用 Bibian 帳號。"
+      },
+      {
+        "id": "methodology_section",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## 範圍、定義與方法\n\n`current` 只指 current artifact pointer 或現行網站的 verified 資料；`historical` 指 Common Crawl／Wayback capture；`terminal` 指 queue 已進 done、challenged、http_error 或 parse_failed。DB count、SHA、provenance 與 current artifact ledger 是高可信證據；archive 全集與 PartSouq live coverage 無法由現有資料證明。"
+      },
+      {
+        "id": "next_steps_section",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## 下一步\n\n1. 站方用 51,529 個 reconciliation cases 補中文名／俗稱。\n2. 接訂單、CSV 或後台 VIN queue，再跑 station sync。\n3. 提供 Linux production host 後安裝 timer，驗收一次跨 1～2 天的月 run。\n4. PartSouq live 維持單一 canary circuit breaker；沒有合法穩定 current source 時保持 blocked。\n5. 最終 Git 操作只用個人 `a861252012`。"
+      },
+      {
+        "id": "further_questions_section",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## 完成判定\n\n已完成範圍可交付。唯一未達核心 business outcome 的項目是 PartSouq 現行 live 全量；在 Cloudflare challenge 仍存在且沒有合法穩定 current source 時，不能宣稱完成。"
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-08-10T21:24:36+08:00",
+    "status": "partial",
+    "datasets": {
+      "headline_metrics": [
+        {
+          "live_current_records": 0,
+          "historical_fitments": 165686,
+          "part_numbers": 52102,
+          "raw_bodies_verified": 23709,
+          "nhtsa_published_rows": 9876638,
+          "tests_passed": 148,
+          "coverage_rate": 0.82,
+          "snapshot_date": "2026-08-10",
+          "overall_status": "partial"
+        }
+      ],
+      "partsouq_entities": [
+        {
+          "entity": "Fitments",
+          "row_count": 165686,
+          "rank": 1,
+          "scope": "historical archive",
+          "verification": "is_verified=0"
+        },
+        {
+          "entity": "Part occurrences",
+          "row_count": 159753,
+          "rank": 2,
+          "scope": "historical archive",
+          "verification": "provenance complete"
+        },
+        {
+          "entity": "Part numbers",
+          "row_count": 52102,
+          "rank": 3,
+          "scope": "historical archive",
+          "verification": "provenance complete"
+        },
+        {
+          "entity": "Vehicle configurations",
+          "row_count": 21510,
+          "rank": 4,
+          "scope": "historical archive",
+          "verification": "provenance complete"
+        },
+        {
+          "entity": "Taxonomy nodes",
+          "row_count": 12114,
+          "rank": 5,
+          "scope": "historical archive",
+          "verification": "navigation-only nodes removed"
+        },
+        {
+          "entity": "Diagrams",
+          "row_count": 2724,
+          "rank": 6,
+          "scope": "historical archive",
+          "verification": "provenance complete"
+        }
+      ],
+      "archive_queue": [
+        {
+          "archive_source": "Common Crawl",
+          "done": 2835,
+          "challenged": 330,
+          "http_error": 0,
+          "parse_failed": 0,
+          "terminal_total": 3165,
+          "selected_total": 3165,
+          "pending": 0,
+          "in_progress": 0,
+          "failed": 0,
+          "coverage_note": "本次 Common Crawl index"
+        },
+        {
+          "archive_source": "Wayback",
+          "done": 22028,
+          "challenged": 1170,
+          "http_error": 96,
+          "parse_failed": 1,
+          "terminal_total": 23295,
+          "selected_total": 23295,
+          "pending": 0,
+          "in_progress": 0,
+          "failed": 0,
+          "coverage_note": "本次 Wayback CDX"
+        }
+      ],
+      "nhtsa_datasets": [
+        {
+          "dataset_name": "manufacturer_communications",
+          "dataset_label": "Manufacturer communications",
+          "published_source_rows": 5797781,
+          "current_rejected_rows": 0,
+          "rank": 1,
+          "count_definition": "current artifact source_rows"
+        },
+        {
+          "dataset_name": "complaints",
+          "dataset_label": "Complaints",
+          "published_source_rows": 2233015,
+          "current_rejected_rows": 0,
+          "rank": 2,
+          "count_definition": "current artifact source_rows"
+        },
+        {
+          "dataset_name": "manufacturer_communications_summary",
+          "dataset_label": "Manufacturer comms summary",
+          "published_source_rows": 1208330,
+          "current_rejected_rows": 0,
+          "rank": 3,
+          "count_definition": "current artifact source_rows"
+        },
+        {
+          "dataset_name": "recalls",
+          "dataset_label": "Recalls",
+          "published_source_rows": 325810,
+          "current_rejected_rows": 0,
+          "rank": 4,
+          "count_definition": "current artifact source_rows"
+        },
+        {
+          "dataset_name": "investigations",
+          "dataset_label": "Investigations",
+          "published_source_rows": 154249,
+          "current_rejected_rows": 0,
+          "rank": 5,
+          "count_definition": "current artifact source_rows"
+        },
+        {
+          "dataset_name": "vpic_variable_values",
+          "dataset_label": "vPIC variable values",
+          "published_source_rows": 69689,
+          "current_rejected_rows": 0,
+          "rank": 6,
+          "count_definition": "current artifact source_rows"
+        },
+        {
+          "dataset_name": "vpic_models",
+          "dataset_label": "vPIC models",
+          "published_source_rows": 31827,
+          "current_rejected_rows": 0,
+          "rank": 7,
+          "count_definition": "current artifact source_rows"
+        },
+        {
+          "dataset_name": "vpic_manufacturers",
+          "dataset_label": "vPIC manufacturers",
+          "published_source_rows": 22881,
+          "current_rejected_rows": 0,
+          "rank": 8,
+          "count_definition": "current artifact source_rows"
+        },
+        {
+          "dataset_name": "safety_ratings",
+          "dataset_label": "Safety ratings",
+          "published_source_rows": 17313,
+          "current_rejected_rows": 0,
+          "rank": 9,
+          "count_definition": "current artifact source_rows"
+        },
+        {
+          "dataset_name": "vpic_makes",
+          "dataset_label": "vPIC makes",
+          "published_source_rows": 12321,
+          "current_rejected_rows": 0,
+          "rank": 10,
+          "count_definition": "current artifact source_rows"
+        },
+        {
+          "dataset_name": "cssi_stations",
+          "dataset_label": "CSSI stations",
+          "published_source_rows": 3278,
+          "current_rejected_rows": 0,
+          "rank": 11,
+          "count_definition": "current artifact source_rows"
+        },
+        {
+          "dataset_name": "vpic_variables",
+          "dataset_label": "vPIC variables",
+          "published_source_rows": 144,
+          "current_rejected_rows": 0,
+          "rank": 12,
+          "count_definition": "current artifact source_rows"
+        }
+      ],
+      "goal_checklist": [
+        {
+          "objective": "NHTSA 官方 bulk + API",
+          "status": "完成",
+          "evidence": "457 current artifacts；9,876,638 source rows；0 rejected",
+          "boundary": "限需求列出的 12 datasets"
+        },
+        {
+          "objective": "PartSouq production MySQL",
+          "status": "完成",
+          "evidence": "state／queue／raw／archive／normalized／provenance 全在 MySQL",
+          "boundary": "SQLite 只作舊 snapshot migration source"
+        },
+        {
+          "objective": "PartSouq 歷史 archive",
+          "status": "附帶 gap 完成",
+          "evidence": "26,460／26,460 terminal",
+          "boundary": "96 HTTP error；1 parse gap；不代表歷史全集"
+        },
+        {
+          "objective": "PartSouq 歷史 normalized",
+          "status": "完成",
+          "evidence": "52,102 parts；165,686 fitments",
+          "boundary": "全部 historical、is_verified=0"
+        },
+        {
+          "objective": "PartSouq live current 全量",
+          "status": "阻擋",
+          "evidence": "標準 Playwright 403 challenge；verified current fitments 0",
+          "boundary": "strict_complete=false"
+        },
+        {
+          "objective": "站方 CRUD／對帳",
+          "status": "完成",
+          "evidence": "10 entities；overlay／audit／CSRF／409／least privilege",
+          "boundary": "對外部署仍需 auth／TLS／reverse proxy"
+        },
+        {
+          "objective": "每月無人值守",
+          "status": "程式完成",
+          "evidence": "1 日 01:00；lease／heartbeat／fencing／DB log／recovery",
+          "boundary": "實際 Linux production host 尚未提供"
+        },
+        {
+          "objective": "完整測試與 package",
+          "status": "完成",
+          "evidence": "148 passed；82%；wheel／sdist／clean venv",
+          "boundary": "warning-as-error；MySQL integration on"
+        }
+      ],
+      "e2e_results": [
+        {
+          "scenario": "Full pytest＋coverage",
+          "environment": "PartSouq／NHTSA MySQL integration on",
+          "status": "通過",
+          "evidence": "148 passed；82%；warning-as-error"
+        },
+        {
+          "scenario": "NHTSA bulk/API publication",
+          "environment": "Official sources＋production MySQL",
+          "status": "通過",
+          "evidence": "9,876,638 current rows；0 rejected"
+        },
+        {
+          "scenario": "NHTSA transient recovery",
+          "environment": "Official API live run",
+          "status": "通過",
+          "evidence": "503／timeout；30／60 秒退避後 completed"
+        },
+        {
+          "scenario": "NHTSA current artifact files",
+          "environment": "457 files＋production MySQL",
+          "status": "通過",
+          "evidence": "538,835,256 bytes；SHA／size／rows 0 mismatch"
+        },
+        {
+          "scenario": "PartSouq raw response restore",
+          "environment": "23,709 production bodies",
+          "status": "通過",
+          "evidence": "4,858,808,157 restored bytes；0 mismatch"
+        },
+        {
+          "scenario": "PartSouq archive queues",
+          "environment": "Common Crawl＋Wayback MySQL queue",
+          "status": "附帶 gap 通過",
+          "evidence": "26,460 terminal；96 HTTP errors；1 parse gap"
+        },
+        {
+          "scenario": "PartSouq historical export",
+          "environment": "Production MySQL＋JSONL",
+          "status": "通過",
+          "evidence": "165,686 rows；179,258,045 bytes；0 provenance fan-out"
+        },
+        {
+          "scenario": "Sensitive URL redaction",
+          "environment": "Full JSONL＋admin HTML",
+          "status": "通過",
+          "evidence": "0 unredacted ssd／VIN query"
+        },
+        {
+          "scenario": "PartSouq live Playwright",
+          "environment": "Real PartSouq＋production MySQL",
+          "status": "正確阻擋",
+          "evidence": "403 challenge；raw saved；current full 未完成"
+        },
+        {
+          "scenario": "Admin production HTTP",
+          "environment": "Gunicorn loopback＋production MySQL",
+          "status": "通過",
+          "evidence": "root／health／monitoring＋10 entity lists 全 200"
+        },
+        {
+          "scenario": "Admin CRUD／permission",
+          "environment": "partsouq_test MySQL",
+          "status": "通過",
+          "evidence": "create／update／retire／restore；409；source UPDATE denied"
+        },
+        {
+          "scenario": "Database integrity",
+          "environment": "Production PartSouq＋NHTSA MySQL",
+          "status": "通過",
+          "evidence": "provenance 0 missing；orphan 0；FK 0；CHECK TABLE all OK"
+        },
+        {
+          "scenario": "Clean wheel install",
+          "environment": "Temporary clean venv",
+          "status": "通過",
+          "evidence": "34 packages；CLI help；schema／template resources present"
+        }
+      ]
+    },
+    "accessIssues": [
+      {
+        "id": "partsouq_live_cloudflare",
+        "scope": "PartSouq live current catalog",
+        "sourceId": "partsouq_live_status",
+        "dataset": "headline_metrics",
+        "message": "Standard Playwright received an HTTP 403 Cloudflare challenge. The raw response was preserved, the run was blocked, and verified current fitments remain zero."
+      },
+      {
+        "id": "production_host_unavailable",
+        "scope": "Monthly Linux deployment",
+        "sourceId": "acceptance_evidence",
+        "dataset": "e2e_results",
+        "message": "No target Linux production host was provided, so the systemd timer has not been installed or observed across a real one-to-two-day run."
+      }
+    ]
+  },
+  "sources": [
+    {
+      "id": "partsouq_counts",
+      "label": "PartSouq MySQL counts",
+      "query": {
+        "engine": "MySQL 8",
+        "sql": "SELECT 'vehicle_configurations' AS entity, COUNT(*) AS row_count FROM partsouq.vehicle_configurations UNION ALL SELECT 'taxonomy_nodes', COUNT(*) FROM partsouq.taxonomy_nodes UNION ALL SELECT 'diagrams', COUNT(*) FROM partsouq.diagrams UNION ALL SELECT 'part_numbers', COUNT(*) FROM partsouq.part_numbers UNION ALL SELECT 'part_occurrences', COUNT(*) FROM partsouq.part_occurrences UNION ALL SELECT 'fitments', COUNT(*) FROM partsouq.fitments;",
+        "description": "Counts the final PartSouq production MySQL normalized entities after parser v3 replay and integrity checks.",
+        "id": "partsouq-entity-counts-20260810",
+        "executed_at": "2026-08-10T21:24:36+08:00",
+        "filters": [
+          "production schema partsouq",
+          "all stored rows"
+        ],
+        "metric_definitions": [
+          "Historical fitments = 165,686 rows with is_verified=0",
+          "Raw bodies verified = 23,709 with SHA and restored byte checks",
+          "Missing provenance, orphan records, and foreign-key violations all equal zero"
+        ],
+        "tables_used": [
+          "partsouq.vehicle_configurations",
+          "partsouq.taxonomy_nodes",
+          "partsouq.diagrams",
+          "partsouq.part_numbers",
+          "partsouq.part_occurrences",
+          "partsouq.fitments"
+        ]
+      }
+    },
+    {
+      "id": "archive_queue_status",
+      "label": "PartSouq archive queue status",
+      "query": {
+        "engine": "MySQL 8",
+        "sql": "SELECT m.archive_source, i.status, COUNT(*) AS row_count FROM partsouq.archive_import_items i JOIN partsouq.archive_import_manifests m ON m.id=i.manifest_id GROUP BY m.archive_source, i.status ORDER BY m.archive_source, i.status;",
+        "description": "Groups every persistent archive queue item by source and terminal state.",
+        "id": "archive-queue-status-20260810",
+        "executed_at": "2026-08-10T21:24:36+08:00",
+        "filters": [
+          "Common Crawl and Wayback manifests loaded for this project"
+        ],
+        "metric_definitions": [
+          "Terminal total = done + challenged + http_error + parse_failed",
+          "Pending, in_progress, and failed are reported separately"
+        ],
+        "tables_used": [
+          "partsouq.archive_import_items",
+          "partsouq.archive_import_manifests",
+          "partsouq.http_responses"
+        ]
+      }
+    },
+    {
+      "id": "partsouq_live_status",
+      "label": "PartSouq live run status",
+      "query": {
+        "engine": "MySQL 8 and crawler CLI",
+        "sql": "SELECT cr.status, cr.blocked_reason, SUM(cq.status='pending') AS pending, SUM(cq.status='challenged') AS challenged, SUM(hr.is_cloudflare_challenge=1) AS challenge_responses FROM partsouq.crawl_runs cr LEFT JOIN partsouq.crawl_queue cq ON cq.run_id=cr.id LEFT JOIN partsouq.http_responses hr ON hr.run_id=cr.id WHERE cr.run_key='partsouq-browser-live-crawl-20260810-mysql' GROUP BY cr.id, cr.status, cr.blocked_reason;",
+        "description": "Reads the persisted live browser run, queue, challenge response, completion checks, and normalized count.",
+        "id": "partsouq-live-status-20260810",
+        "executed_at": "2026-08-10T21:24:36+08:00",
+        "filters": [
+          "standard Playwright run key = partsouq-browser-live-crawl-20260810-mysql"
+        ],
+        "metric_definitions": [
+          "Live current records = verified current fitments from a complete live run",
+          "Strict complete requires queue exhaustion and no challenge, parse failure, or provenance gap"
+        ],
+        "tables_used": [
+          "partsouq.crawl_runs",
+          "partsouq.crawl_queue",
+          "partsouq.http_responses",
+          "partsouq.record_sources"
+        ]
+      }
+    },
+    {
+      "id": "nhtsa_published_rows",
+      "label": "NHTSA current artifact publication",
+      "query": {
+        "engine": "MySQL 8",
+        "sql": "SELECT a.dataset_name, SUM(a.source_rows) AS published_source_rows, SUM(a.rejected_rows) AS current_rejected_rows FROM nhtsa.nhtsa_current_artifacts c JOIN nhtsa.nhtsa_source_artifacts a ON a.id=c.artifact_id GROUP BY a.dataset_name ORDER BY a.dataset_name;",
+        "description": "Sums source rows and rejected rows for the artifacts currently published by dataset.",
+        "id": "nhtsa-current-publication-20260810",
+        "executed_at": "2026-08-10T21:24:36+08:00",
+        "filters": [
+          "only artifacts referenced by nhtsa_current_artifacts"
+        ],
+        "metric_definitions": [
+          "Published source rows = SUM(nhtsa_source_artifacts.source_rows) for current artifacts",
+          "Current rejected rows = SUM(rejected_rows) for current artifacts"
+        ],
+        "tables_used": [
+          "nhtsa.nhtsa_current_artifacts",
+          "nhtsa.nhtsa_source_artifacts"
+        ]
+      }
+    },
+    {
+      "id": "test_suite",
+      "label": "Full pytest and coverage run",
+      "query": {
+        "engine": "shell",
+        "sql": "NHTSA_TEST_MYSQL=1 PARTSOUQ_TEST_MYSQL=1 .venv/bin/python -W error -m pytest --cov=partsouq_crawler --cov-report=term:skip-covered",
+        "description": "Runs all unit and integration tests with both MySQL suites enabled, warnings promoted to errors, and statement coverage.",
+        "id": "full-test-suite-20260810",
+        "executed_at": "2026-08-10T21:24:36+08:00",
+        "filters": [
+          "testpaths=tests",
+          "PARTSOUQ_TEST_MYSQL=1",
+          "NHTSA_TEST_MYSQL=1",
+          "warnings=error"
+        ],
+        "metric_definitions": [
+          "Tests passed = 148",
+          "Statement coverage = 82% of 6,056 statements",
+          "Warnings are promoted to errors"
+        ],
+        "tables_used": [
+          "partsouq_test.*",
+          "nhtsa_test.*",
+          "tests.*"
+        ]
+      }
+    },
+    {
+      "id": "acceptance_evidence",
+      "label": "Acceptance E2E evidence ledger",
+      "query": {
+        "engine": "verified commands and MySQL audits",
+        "sql": "partsouq-crawler db-status; partsouq-crawler export --include-unverified-fitments; verify all PartSouq body SHA and bytes; verify all NHTSA current artifact SHA, bytes, and rows; CHECK TABLE ... QUICK; curl loopback admin routes; uv build --offline; clean wheel install",
+        "description": "Exact production DB, raw-body, artifact, export, HTTP admin, package, and test checks recorded in the Markdown report.",
+        "id": "acceptance-evidence-20260810",
+        "executed_at": "2026-08-10T21:24:36+08:00",
+        "filters": [
+          "production and test MySQL schemas",
+          "temporary export and clean wheel environment",
+          "no production passwords or local absolute paths embedded"
+        ],
+        "metric_definitions": [
+          "A scenario is passed only when its command exited zero and its stated assertions matched",
+          "Blocked means the negative-path safety behavior passed but the business objective remains incomplete"
+        ],
+        "tables_used": [
+          "partsouq.*",
+          "partsouq_test.*",
+          "nhtsa.*",
+          "nhtsa_test.*"
+        ]
+      }
+    }
+  ]
+}

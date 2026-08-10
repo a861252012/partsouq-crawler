@@ -63,6 +63,11 @@ def is_in_scope(url: str, seed_url: str) -> bool:
         return False
     if seed.hostname not in {"partsouq.com", "www.partsouq.com"}:
         return target.scheme in {"http", "https"}
-    if target.path in {"/robots.txt", "/sitemap.xml"} or target.path.endswith((".xml", ".xml.gz")):
+    if target.path in {"/robots.txt", "/sitemap.xml", "/catalogmap.xml"}:
         return True
-    return target.path.startswith("/en/catalog/genuine") or target.path == "/en/search/all"
+    if target.path.endswith(("-catalogmap.xml", "-catalogmap.xml.gz")):
+        return True
+    return (
+        target.path.startswith(("/en/catalog/genuine", "/catalog/genuine"))
+        or target.path == "/en/search/all"
+    )

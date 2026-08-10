@@ -8,6 +8,7 @@ from typing import Any
 
 from partsouq_crawler.db.repository import Repository
 from partsouq_crawler.exporters.csv_exporter import spreadsheet_safe
+from partsouq_crawler.parsers.base import PARSER_VERSION
 from partsouq_crawler.services.archive_queue import redact_sensitive_url
 
 EXPORT_BATCH_SIZE = 1_000
@@ -78,7 +79,6 @@ class ExportService:
         include_sensitive_source_urls: bool,
     ) -> AsyncIterator[list[dict[str, Any]]]:
         fitment_id = 0
-        source_id = 0
         while True:
             cursor = await self.repository.connection.execute(
                 """
@@ -123,18 +123,27 @@ class ExportService:
             JOIN vehicle_configurations v ON v.id = f.vehicle_configuration_id
             JOIN diagrams d ON d.id = f.diagram_id
             LEFT JOIN taxonomy_nodes tn ON tn.id = d.taxonomy_node_id
-            JOIN record_sources rs ON rs.record_type = 'fitment' AND rs.record_id = f.id
+            JOIN record_sources rs ON rs.id = (
+                SELECT candidate.id
+                FROM record_sources candidate
+                WHERE candidate.record_type = 'fitment'
+                  AND candidate.record_id = f.id
+                ORDER BY
+                    (candidate.parser_name = 'catalog_parser'
+                     AND candidate.parser_version = ?) DESC,
+                    candidate.id DESC
+                LIMIT 1
+            )
             JOIN http_responses hr ON hr.id = rs.response_id
             LEFT JOIN archive_captures ac ON ac.response_id = hr.id
-            WHERE (f.id > ? OR (f.id = ? AND rs.id > ?))
+            WHERE f.id > ?
               AND (? = 1 OR f.is_verified = 1)
-            ORDER BY f.id, rs.id
+            ORDER BY f.id
             LIMIT ?
             """,
                 (
+                    PARSER_VERSION,
                     fitment_id,
-                    fitment_id,
-                    source_id,
                     int(include_unverified_fitments),
                     EXPORT_BATCH_SIZE,
                 ),
@@ -151,11 +160,9 @@ class ExportService:
             ]
             last = raw_rows[-1]
             fitment_id = int(last["fitment_id"])
-            source_id = int(last["source_record_id"])
 
         if include_compatibility_hints:
             hint_id = 0
-            hint_source_id = 0
             while True:
                 cursor = await self.repository.connection.execute(
                     """
@@ -164,14 +171,27 @@ class ExportService:
                            pn.name_en_raw, pn.number_raw, rs.response_id, hr.body_sha256
                     FROM compatibility_hints h
                     JOIN part_numbers pn ON pn.id = h.part_number_id
-                    JOIN record_sources rs
-                      ON rs.record_type = 'compatibility_hint' AND rs.record_id = h.id
+                    JOIN record_sources rs ON rs.id = (
+                        SELECT candidate.id
+                        FROM record_sources candidate
+                        WHERE candidate.record_type = 'compatibility_hint'
+                          AND candidate.record_id = h.id
+                        ORDER BY
+                            (candidate.parser_name = 'catalog_parser'
+                             AND candidate.parser_version = ?) DESC,
+                            candidate.id DESC
+                        LIMIT 1
+                    )
                     JOIN http_responses hr ON hr.id = rs.response_id
-                    WHERE h.id > ? OR (h.id = ? AND rs.id > ?)
-                    ORDER BY h.id, rs.id
+                    WHERE h.id > ?
+                    ORDER BY h.id
                     LIMIT ?
                     """,
-                    (hint_id, hint_id, hint_source_id, EXPORT_BATCH_SIZE),
+                    (
+                        PARSER_VERSION,
+                        hint_id,
+                        EXPORT_BATCH_SIZE,
+                    ),
                 )
                 raw_rows = [dict(row) for row in await cursor.fetchall()]
                 if not raw_rows:
@@ -185,7 +205,6 @@ class ExportService:
                 ]
                 last = raw_rows[-1]
                 hint_id = int(last["hint_id"])
-                hint_source_id = int(last["source_record_id"])
 
     async def export(
         self,

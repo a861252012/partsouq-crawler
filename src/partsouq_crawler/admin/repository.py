@@ -195,6 +195,16 @@ _VIN_VEHICLE_FIELDS = (
     "vehicle_type",
     "model_year",
     "manufacturer_name",
+    "trim_name",
+    "engine_configuration",
+    "engine_cylinders",
+    "displacement_l_raw",
+    "engine_model",
+    "engine_manufacturer",
+    "fuel_type_primary",
+    "drive_type",
+    "transmission_style",
+    "plant_country",
     "partsouq_vehicle_configuration_id",
     "decode_status",
     "error_code",
@@ -204,6 +214,31 @@ _VIN_VEHICLE_FIELDS = (
     "decoded_at",
     "created_at",
     "updated_at",
+)
+_VIN_VEHICLE_EDITABLE_FIELDS = (
+    "vin",
+    "make_name",
+    "model_name",
+    "series_name",
+    "body_class",
+    "vehicle_type",
+    "model_year",
+    "manufacturer_name",
+    "trim_name",
+    "engine_configuration",
+    "engine_cylinders",
+    "displacement_l_raw",
+    "engine_model",
+    "engine_manufacturer",
+    "fuel_type_primary",
+    "drive_type",
+    "transmission_style",
+    "plant_country",
+    "partsouq_vehicle_configuration_id",
+    "decode_status",
+    "error_code",
+    "error_text",
+    "source_kind",
 )
 _VIN_PART_FIELDS = (
     "vin_vehicle_mapping_id",
@@ -271,6 +306,16 @@ FIELD_LABELS: dict[str, str] = {
     "part_number_id": "零件資料 ID",
     "vehicle_configuration_id": "車型資料 ID",
     "vin_vehicle_mapping_id": "VIN 車型資料 ID",
+    "trim_name": "車型等級 Trim",
+    "engine_configuration": "引擎形式",
+    "engine_cylinders": "汽缸數",
+    "displacement_l_raw": "排氣量（公升）",
+    "engine_model": "引擎型號",
+    "engine_manufacturer": "引擎製造商",
+    "fuel_type_primary": "主要燃料",
+    "drive_type": "驅動方式",
+    "transmission_style": "變速箱形式",
+    "plant_country": "生產國",
     "is_verified": "已人工確認",
     "derivation": "判定依據",
     "confidence": "信心分數",
@@ -434,7 +479,7 @@ ENTITY_SPECS: dict[str, EntitySpec] = {
         table="vin_vehicle_mappings",
         record_type="vin_vehicle_mapping",
         source_fields=_VIN_VEHICLE_FIELDS,
-        editable_fields=_VIN_VEHICLE_FIELDS[:13],
+        editable_fields=_VIN_VEHICLE_EDITABLE_FIELDS,
         search_fields=("vin", "make_name", "model_name", "series_name"),
         display_fields=(
             "vin",
@@ -442,6 +487,9 @@ ENTITY_SPECS: dict[str, EntitySpec] = {
             "model_name",
             "series_name",
             "model_year",
+            "trim_name",
+            "engine_configuration",
+            "displacement_l_raw",
             "partsouq_vehicle_configuration_id",
         ),
     ),
@@ -567,6 +615,91 @@ class AdminRepository:
                 "retired": int(overrides.get(key, {}).get("retired_count", 0)),
             }
             for key in ENTITY_SPECS
+        }
+
+    def crawl_monitoring(self) -> dict[str, tuple[dict[str, Any], ...]]:
+        monthly_runs = self.database.fetch_all(
+            "monitor.monthly-runs",
+            """
+            SELECT id, period_key, status, attempts, max_attempts,
+                   nhtsa_bulk_status, nhtsa_api_status, station_status,
+                   partsouq_status, scheduled_for, started_at, heartbeat_at,
+                   ended_at, last_error
+            FROM monthly_sync_runs
+            ORDER BY id DESC
+            LIMIT 24
+            """,
+        )
+        crawl_runs = self.database.fetch_all(
+            "monitor.crawl-runs",
+            """
+            WITH recent_runs AS (
+                SELECT id, run_key, status, blocked_reason, started_at,
+                       updated_at, ended_at, config_json
+                FROM crawl_runs
+                ORDER BY id DESC
+                LIMIT 50
+            ),
+            queue_counts AS (
+                SELECT q.run_id,
+                       COUNT(*) AS discovered,
+                       SUM(q.status = 'pending') AS pending,
+                       SUM(q.status = 'in_progress') AS in_progress,
+                       SUM(q.status = 'done') AS done,
+                       SUM(q.status = 'failed') AS failed,
+                       SUM(q.status = 'challenged') AS challenged,
+                       MAX(q.attempts) AS max_attempts
+                FROM crawl_queue AS q
+                JOIN recent_runs AS r ON r.id = q.run_id
+                GROUP BY q.run_id
+            ),
+            response_counts AS (
+                SELECT h.run_id,
+                       COUNT(*) AS responses,
+                       SUM(h.http_status = 429) AS rate_limited,
+                       SUM(h.is_cloudflare_challenge = 1) AS challenge_responses,
+                       ROUND(AVG(h.elapsed_ms)) AS average_elapsed_ms,
+                       MIN(h.fetched_at) AS first_response_at,
+                       MAX(h.fetched_at) AS last_response_at
+                FROM http_responses AS h
+                JOIN recent_runs AS r ON r.id = h.run_id
+                GROUP BY h.run_id
+            )
+            SELECT r.id, r.run_key, r.status, r.blocked_reason,
+                   r.started_at, r.updated_at, r.ended_at, r.config_json,
+                   COALESCE(q.discovered, 0) AS discovered,
+                   COALESCE(q.pending, 0) AS pending,
+                   COALESCE(q.in_progress, 0) AS in_progress,
+                   COALESCE(q.done, 0) AS done,
+                   COALESCE(q.failed, 0) AS failed,
+                   COALESCE(q.challenged, 0) AS challenged,
+                   COALESCE(q.max_attempts, 0) AS max_attempts,
+                   COALESCE(h.responses, 0) AS responses,
+                   COALESCE(h.rate_limited, 0) AS rate_limited,
+                   COALESCE(h.challenge_responses, 0) AS challenge_responses,
+                   COALESCE(h.average_elapsed_ms, 0) AS average_elapsed_ms,
+                   h.first_response_at, h.last_response_at
+            FROM recent_runs AS r
+            LEFT JOIN queue_counts AS q ON q.run_id = r.id
+            LEFT JOIN response_counts AS h ON h.run_id = r.id
+            ORDER BY r.id DESC
+            """,
+        )
+        events = self.database.fetch_all(
+            "monitor.events",
+            """
+            SELECT e.id, m.period_key, e.source_name, e.level,
+                   e.event_type, e.message, e.occurred_at
+            FROM monthly_sync_events AS e
+            JOIN monthly_sync_runs AS m ON m.id = e.monthly_run_id
+            ORDER BY e.id DESC
+            LIMIT 100
+            """,
+        )
+        return {
+            "monthly_runs": tuple(monthly_runs),
+            "crawl_runs": tuple(crawl_runs),
+            "events": tuple(events),
         }
 
     def list_records(

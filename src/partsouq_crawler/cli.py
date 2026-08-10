@@ -13,7 +13,13 @@ from zoneinfo import ZoneInfo
 
 import pymysql
 
-from partsouq_crawler.config import DEFAULT_SEED, CrawlerConfig, PartSouqMySQLConfig
+from partsouq_crawler.config import (
+    DEFAULT_PARTSOUQ_DELAY_SECONDS,
+    DEFAULT_PARTSOUQ_MAX_RETRIES,
+    DEFAULT_SEED,
+    CrawlerConfig,
+    PartSouqMySQLConfig,
+)
 from partsouq_crawler.crawl.challenge import detect_challenge
 from partsouq_crawler.crawl.engine import CrawlerEngine
 from partsouq_crawler.crawl.fetcher import FetchError
@@ -23,7 +29,7 @@ from partsouq_crawler.crawl.transport import create_fetch_transport
 from partsouq_crawler.db.repository import Repository
 from partsouq_crawler.logging import CrawlLogger
 from partsouq_crawler.nhtsa.api_service import NhtsaApiSyncService
-from partsouq_crawler.nhtsa.config import NhtsaConfig
+from partsouq_crawler.nhtsa.config import DEFAULT_NHTSA_API_DELAY_SECONDS, NhtsaConfig
 from partsouq_crawler.nhtsa.datasets import BULK_SOURCES_BY_SCOPE
 from partsouq_crawler.nhtsa.repository import NhtsaMySQLRepository
 from partsouq_crawler.nhtsa.service import NhtsaBulkSyncService
@@ -58,9 +64,9 @@ def build_parser() -> argparse.ArgumentParser:
     crawl.add_argument("--max-pages", type=int, default=0)
     crawl.add_argument("--max-depth", type=int, default=0)
     crawl.add_argument("--concurrency", type=int, default=1)
-    crawl.add_argument("--delay", type=float, default=5.0)
+    crawl.add_argument("--delay", type=float, default=DEFAULT_PARTSOUQ_DELAY_SECONDS)
     crawl.add_argument("--timeout", type=float, default=30.0)
-    crawl.add_argument("--retry-count", type=int, default=3)
+    crawl.add_argument("--retry-count", type=int, default=DEFAULT_PARTSOUQ_MAX_RETRIES)
     crawl.add_argument("--robots-policy", choices=("require", "ignore"), default="require")
     crawl.add_argument("--user-agent")
     crawl.add_argument("--json-log", action="store_true")
@@ -99,6 +105,14 @@ def build_parser() -> argparse.ArgumentParser:
     reparse.add_argument("--response-id", type=int)
     reparse.add_argument("--run-id", type=int)
     reparse.add_argument("--page-type")
+    reparse.add_argument("--batch-size", type=int, default=250)
+
+    taxonomy_repair = subparsers.add_parser(
+        "repair-taxonomy",
+        help="Preview or remove parser-v2 navigation breadcrumbs from normalized taxonomy",
+    )
+    _partsouq_mysql_arguments(taxonomy_repair)
+    taxonomy_repair.add_argument("--apply", action="store_true")
 
     export = subparsers.add_parser("export")
     _partsouq_mysql_arguments(export)
@@ -345,9 +359,15 @@ async def dispatch(args: argparse.Namespace) -> int:
                 response_id=args.response_id,
                 run_id=args.run_id,
                 page_type=args.page_type,
+                batch_size=args.batch_size,
             )
             _print_json(reparse_report)
             return 0 if reparse_report["failed"] == 0 else 1
+        if args.command == "repair-taxonomy":
+            _print_json(
+                await ReparseService(repository).repair_legacy_navigation_taxonomy(apply=args.apply)
+            )
+            return 0
         if args.command == "export":
             count = await ExportService(repository).export(
                 args.output,
@@ -485,6 +505,39 @@ def _monthly_commands(
     mysql_config: PartSouqMySQLConfig,
 ) -> tuple[MonthlySourceCommand, ...]:
     module = (sys.executable, "-m", "partsouq_crawler")
+    partsouq_delay = max(
+        DEFAULT_PARTSOUQ_DELAY_SECONDS,
+        float(
+            os.getenv(
+                "PARTSOUQ_DELAY_SECONDS",
+                str(DEFAULT_PARTSOUQ_DELAY_SECONDS),
+            )
+        ),
+    )
+    partsouq_retries = min(
+        DEFAULT_PARTSOUQ_MAX_RETRIES,
+        max(
+            0,
+            int(
+                os.getenv(
+                    "PARTSOUQ_MAX_RETRIES",
+                    str(DEFAULT_PARTSOUQ_MAX_RETRIES),
+                )
+            ),
+        ),
+    )
+    nhtsa_delay = max(
+        DEFAULT_NHTSA_API_DELAY_SECONDS,
+        float(
+            os.getenv(
+                "NHTSA_API_DELAY_SECONDS",
+                str(DEFAULT_NHTSA_API_DELAY_SECONDS),
+            )
+        ),
+    )
+    partsouq_transport = os.getenv("PARTSOUQ_TRANSPORT", "browser").strip().lower()
+    if partsouq_transport not in {"browser", "http"}:
+        raise ValueError("monthly PartSouq transport must be browser or http")
     child_environment = {
         "PYTHONUNBUFFERED": "1",
         "PARTSOUQ_MYSQL_HOST": mysql_config.host,
@@ -495,7 +548,7 @@ def _monthly_commands(
         "PARTSOUQ_MYSQL_POOL_MIN_SIZE": str(mysql_config.pool_min_size),
         "PARTSOUQ_MYSQL_POOL_MAX_SIZE": str(mysql_config.pool_max_size),
     }
-    partsouq_command = (
+    partsouq_command = [
         *module,
         "crawl-all",
         "--run-id",
@@ -509,28 +562,31 @@ def _monthly_commands(
         "--concurrency",
         "1",
         "--delay",
-        os.getenv("PARTSOUQ_DELAY_SECONDS", "5"),
+        str(partsouq_delay),
         "--timeout",
         os.getenv("PARTSOUQ_REQUEST_TIMEOUT_SECONDS", "60"),
         "--retry-count",
-        os.getenv("PARTSOUQ_MAX_RETRIES", "3"),
+        str(partsouq_retries),
         "--robots-policy",
-        os.getenv("PARTSOUQ_ROBOTS_POLICY", "require"),
+        "require",
+        "--user-agent",
+        os.getenv("PARTSOUQ_USER_AGENT", "partsouq-monthly-sync/0.1"),
         "--transport",
-        "nodriver",
-        "--browser-executable",
-        os.getenv("PARTSOUQ_BROWSER_EXECUTABLE", ""),
-        "--browser-profile-dir",
-        os.getenv("PARTSOUQ_BROWSER_PROFILE_DIR", "output/partsouq/browser-profile"),
-        "--browser-worker-command",
-        os.getenv("PARTSOUQ_BROWSER_WORKER_COMMAND", ""),
-        "--browser-challenge-wait",
-        os.getenv("PARTSOUQ_BROWSER_CHALLENGE_WAIT_SECONDS", "60"),
-        "--browser-restart-pages",
-        os.getenv("PARTSOUQ_BROWSER_RESTART_PAGES", "500"),
-        "--retry-challenges",
-        "--json-log",
-    )
+        partsouq_transport,
+    ]
+    if partsouq_transport == "browser":
+        executable = os.getenv("PARTSOUQ_BROWSER_EXECUTABLE", "").strip()
+        if executable:
+            partsouq_command.extend(("--browser-executable", executable))
+        if os.getenv("PARTSOUQ_BROWSER_HEADLESS", "1").lower() in {"1", "true", "yes"}:
+            partsouq_command.append("--browser-headless")
+        partsouq_command.extend(
+            (
+                "--browser-challenge-wait",
+                os.getenv("PARTSOUQ_BROWSER_CHALLENGE_WAIT_SECONDS", "60"),
+            )
+        )
+    partsouq_command.append("--json-log")
     return (
         MonthlySourceCommand(
             source_name="nhtsa_bulk",
@@ -544,7 +600,10 @@ def _monthly_commands(
                 "all",
                 "--json-log",
             ),
-            environment={"PYTHONUNBUFFERED": "1"},
+            environment={
+                "PYTHONUNBUFFERED": "1",
+                "NHTSA_API_DELAY_SECONDS": str(nhtsa_delay),
+            },
         ),
         MonthlySourceCommand(
             source_name="nhtsa_api",
@@ -558,7 +617,10 @@ def _monthly_commands(
                 "all",
                 "--json-log",
             ),
-            environment={"PYTHONUNBUFFERED": "1"},
+            environment={
+                "PYTHONUNBUFFERED": "1",
+                "NHTSA_API_DELAY_SECONDS": str(nhtsa_delay),
+            },
         ),
         MonthlySourceCommand(
             source_name="station",
@@ -574,13 +636,13 @@ def _monthly_commands(
                 **child_environment,
                 "NHTSA_USER_AGENT": os.getenv("NHTSA_USER_AGENT", "nhtsa-official-data-sync/0.1"),
                 "NHTSA_REQUEST_TIMEOUT_SECONDS": os.getenv("NHTSA_REQUEST_TIMEOUT_SECONDS", "120"),
-                "NHTSA_API_DELAY_SECONDS": os.getenv("NHTSA_API_DELAY_SECONDS", "0.2"),
+                "NHTSA_API_DELAY_SECONDS": str(nhtsa_delay),
             },
         ),
         MonthlySourceCommand(
             source_name="partsouq",
             run_key=f"monthly-{period_key}-partsouq",
-            command=partsouq_command,
+            command=tuple(partsouq_command),
             environment=child_environment,
         ),
     )

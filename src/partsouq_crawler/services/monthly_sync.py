@@ -99,7 +99,8 @@ class MonthlySyncService:
         try:
             for command in commands:
                 current_source = command.source_name
-                if source_statuses[command.source_name] == "completed":
+                current_status = source_statuses[command.source_name]
+                if current_status == "completed":
                     await self._event(
                         lease,
                         source_name=command.source_name,
@@ -107,22 +108,39 @@ class MonthlySyncService:
                         message=f"{command.source_name} already completed in an earlier attempt",
                     )
                     continue
-                if self.stop_event.is_set():
-                    source_statuses[command.source_name] = "interrupted"
-                    break
-                if command.source_name == "partsouq" and source_statuses[command.source_name] == (
-                    "blocked"
-                ):
-                    requeued = await self.repository.requeue_problems(
-                        command.run_key, ("challenged",)
-                    )
+                if command.source_name == "partsouq" and current_status == "blocked":
                     await self._event(
                         lease,
                         source_name=command.source_name,
-                        event_type="source_challenge_requeued",
-                        message=f"requeued {requeued} challenged PartSouq URLs",
-                        details={"requeued": requeued},
+                        event_type="source_skipped_blocked",
+                        message="partsouq remains blocked; no additional canary was sent",
                     )
+                    continue
+                if command.source_name == "partsouq":
+                    existing_run = await self.repository.get_run(command.run_key)
+                    if existing_run is not None and str(existing_run["status"]) == "blocked":
+                        reason = str(existing_run["blocked_reason"] or "cloudflare_challenge")
+                        source_statuses[command.source_name] = "blocked"
+                        errors[command.source_name] = reason
+                        await self.repository.update_monthly_source(
+                            lease.run_id,
+                            owner_id=self.owner_id,
+                            fencing_token=lease.fencing_token,
+                            source_name=command.source_name,
+                            status="blocked",
+                            run_key=command.run_key,
+                            error=reason,
+                        )
+                        await self._event(
+                            lease,
+                            source_name=command.source_name,
+                            event_type="source_skipped_blocked",
+                            message="existing challenge found; no second canary was sent",
+                        )
+                        continue
+                if self.stop_event.is_set():
+                    source_statuses[command.source_name] = "interrupted"
+                    break
                 await self.repository.update_monthly_source(
                     lease.run_id,
                     owner_id=self.owner_id,
@@ -172,7 +190,10 @@ class MonthlySyncService:
                 final_status, exit_code = "interrupted", 1
             elif all(status == "completed" for status in source_statuses.values()):
                 final_status, exit_code = "completed", 0
-            elif lease.attempts >= lease.max_attempts:
+            elif (
+                all(status in {"blocked", "completed"} for status in source_statuses.values())
+                or lease.attempts >= lease.max_attempts
+            ):
                 final_status, exit_code = "completed_with_gaps", 2
             else:
                 final_status, exit_code = "failed", 1

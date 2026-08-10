@@ -26,6 +26,8 @@ mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" partsouq \
     < /opt/partsouq-schema/005_monthly_sync_runs.sql
 mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" partsouq \
     < /opt/partsouq-schema/006_station_admin.sql
+mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" partsouq \
+    < /opt/partsouq-schema/007_vin_vehicle_specs.sql
 mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" partsouq_test \
     < /opt/partsouq-schema/mysql_schema.sql
 mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" partsouq_test \
@@ -34,6 +36,8 @@ mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" partsouq_test \
     < /opt/partsouq-schema/005_monthly_sync_runs.sql
 mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" partsouq_test \
     < /opt/partsouq-schema/006_station_admin.sql
+mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" partsouq_test \
+    < /opt/partsouq-schema/007_vin_vehicle_specs.sql
 
 mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" <<SQL
 GRANT SELECT ON partsouq.* TO 'partsouq_admin'@'%';

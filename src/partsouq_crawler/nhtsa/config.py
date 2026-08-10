@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+DEFAULT_NHTSA_API_DELAY_SECONDS = 1.0
+
 
 @dataclass(frozen=True, slots=True)
 class NhtsaConfig:
@@ -15,7 +17,7 @@ class NhtsaConfig:
     raw_dir: Path = Path("output/nhtsa/raw")
     user_agent: str = "nhtsa-official-data-sync/0.1"
     request_timeout_seconds: float = 120.0
-    api_delay_seconds: float = 0.2
+    api_delay_seconds: float = DEFAULT_NHTSA_API_DELAY_SECONDS
 
     @classmethod
     def from_env(cls, **overrides: object) -> NhtsaConfig:
@@ -28,7 +30,9 @@ class NhtsaConfig:
             "raw_dir": Path(os.getenv("NHTSA_RAW_DIR", "output/nhtsa/raw")),
             "user_agent": os.getenv("NHTSA_USER_AGENT", "nhtsa-official-data-sync/0.1"),
             "request_timeout_seconds": float(os.getenv("NHTSA_REQUEST_TIMEOUT_SECONDS", "120")),
-            "api_delay_seconds": float(os.getenv("NHTSA_API_DELAY_SECONDS", "0.2")),
+            "api_delay_seconds": float(
+                os.getenv("NHTSA_API_DELAY_SECONDS", str(DEFAULT_NHTSA_API_DELAY_SECONDS))
+            ),
         }
         values.update({key: value for key, value in overrides.items() if value is not None})
         config = cls(

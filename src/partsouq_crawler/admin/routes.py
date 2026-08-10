@@ -195,6 +195,11 @@ def health() -> dict[str, object]:
     return {"status": "ok", "entities": len(counts)}
 
 
+@bp.get("/monitoring")
+def monitoring() -> str:
+    return render_template("monitoring.html", monitor=_repository().crawl_monitoring())
+
+
 @bp.get("/entities/<entity_type>")
 def entity_list(entity_type: str) -> str:
     spec = entity_spec(entity_type)

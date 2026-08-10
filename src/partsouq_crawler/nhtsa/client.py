@@ -10,6 +10,7 @@ import aiofiles
 import aiohttp
 import certifi
 
+from partsouq_crawler.crawl.rate_limit import HostRateLimiter
 from partsouq_crawler.nhtsa.config import NhtsaConfig
 from partsouq_crawler.nhtsa.datasets import BulkSource
 from partsouq_crawler.nhtsa.models import DownloadedArtifact
@@ -22,6 +23,7 @@ class NhtsaDownloadError(RuntimeError):
 class NhtsaBulkClient:
     def __init__(self, config: NhtsaConfig) -> None:
         self.config = config
+        self.rate_limiter = HostRateLimiter(config.api_delay_seconds)
         self.session: aiohttp.ClientSession | None = None
 
     async def __aenter__(self) -> NhtsaBulkClient:
@@ -57,6 +59,7 @@ class NhtsaBulkClient:
         target_dir.mkdir(parents=True, exist_ok=True)
         temp_path: Path | None = None
         try:
+            await self.rate_limiter.wait()
             async with self.session.get(source.url, headers=headers) as response:
                 response_headers = {key.lower(): value for key, value in response.headers.items()}
                 if response.status == 304:

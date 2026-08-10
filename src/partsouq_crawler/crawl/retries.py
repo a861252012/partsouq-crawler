@@ -5,6 +5,7 @@ import random
 from datetime import UTC, datetime
 
 RETRYABLE_STATUS = {500, 502, 503, 504}
+MIN_RATE_LIMIT_COOLDOWN_SECONDS = 6 * 60 * 60
 
 
 def retry_delay(attempt: int, retry_after: str | None = None) -> float:
@@ -24,3 +25,7 @@ def retry_delay(attempt: int, retry_after: str | None = None) -> float:
     base: float = min(60.0, float(2 ** max(0, attempt - 1)))
     jitter: float = float(random.uniform(0.0, base * 0.25))
     return base + jitter
+
+
+def rate_limit_delay(attempt: int, retry_after: str | None = None) -> float:
+    return max(MIN_RATE_LIMIT_COOLDOWN_SECONDS, retry_delay(attempt, retry_after))

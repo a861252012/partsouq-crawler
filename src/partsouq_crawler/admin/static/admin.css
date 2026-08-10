@@ -39,6 +39,7 @@ pre { padding: 1rem; overflow: auto; background: #101828; border-radius: .45rem;
 .notice { margin-bottom: 1rem; padding: .8rem; border-radius: .4rem; background: #d1fadf; }
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; }
+.monitor-table { min-width: 70rem; }
 th, td { padding: .65rem; border-bottom: 1px solid #e4e7ec; text-align: left; vertical-align: top; }
 td a { overflow-wrap: anywhere; }
 .empty { padding: 2rem; text-align: center; color: #667085; }

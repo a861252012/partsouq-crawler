@@ -4,7 +4,7 @@
 
 目前已確認的邊界：
 
-- PartSouq live：標準 HTTP、Playwright 與 Patchright 實測仍收到 Cloudflare challenge；headed Google Chrome + NoDriver 在本機 macOS 可無人工操作自動轉成 200，且已抓取、解析、寫入 MySQL。相同程式在 Linux Docker + Xvfb 仍是 403，Docker 開啟 Chrome sandbox 時則無法啟動。因此 server 必須在實際 Linux host 先通過 preflight，不能把本機成功誤寫成任意 server 已保證成功。
+- PartSouq live：標準 HTTP 與 Playwright 的最新 canary 仍收到 Cloudflare challenge。一次 NoDriver 本機 run 曾取得 56 個 200 response 並寫入 MySQL，之後仍遇 challenge，尚有 140,521 個 URL 未完成；因此只能算 partial live，不能稱為現行全量。正式月排程不使用 stealth／指紋偽裝／proxy／clearance 搬運，而是標準 headless Playwright 單次 canary；challenge raw-first 入庫後，同月份不再反覆探測。
 - PartSouq archive：可從 Common Crawl WARC、Wayback CDX 及合法持有的 HTML 取得真實歷史型錄。全部標為 `historical_archive`，fitment 固定是 unverified，不會冒充 current。
 - NHTSA：已實作官方 bulk files、CSSI 與 vPIC allowlist endpoint 的完整 raw artifact、版本、lineage 與 current pointer 流程。
 
@@ -14,8 +14,6 @@
 
 ```bash
 uv sync --extra dev --frozen
-python3.12 -m venv .venv-browser
-.venv-browser/bin/pip install --requirement browser_worker/requirements.txt
 source .venv/bin/activate
 partsouq-crawler --help
 ```
@@ -29,7 +27,7 @@ cp -n .env.example .env
 docker compose -f compose.nhtsa.yml up -d
 ```
 
-預設密碼只供本機開發。正式環境必須覆寫 `.env`；不得提交 `.env`、raw artifact、DB volume、archive index 或匯出資料。
+本機預設 root 是 `root/root`；應用程式使用 `partsouq/partsouq-local`、`nhtsa/nhtsa-local`，後台使用唯讀來源帳號 `partsouq_admin/partsouq-admin-local`。這些預設密碼只供綁在 `127.0.0.1` 的開發環境。正式環境必須覆寫 `.env`；不得提交 `.env`、raw artifact、DB volume、archive index、備份或匯出資料。
 
 ## PartSouq live crawler
 
@@ -47,7 +45,7 @@ partsouq-crawler crawl-all \
   --run-id partsouq-genuine-full \
   --seed-url 'https://partsouq.com/en/catalog/genuine' \
   --max-pages 0 --max-depth 0 \
-  --concurrency 1 --delay 5 \
+  --concurrency 1 --delay 30 --retry-count 1 \
   --robots-policy require \
   --user-agent "$PARTSOUQ_USER_AGENT"
 ```
@@ -56,37 +54,26 @@ partsouq-crawler crawl-all \
 
 ### Browser transports
 
-Playwright `browser` transport 只處理一般瀏覽器 JavaScript，仍會暴露自動化特徵；NoDriver 則是獨立外部 worker。任一 driver 偵測到未解除的 challenge 後都會啟動共用熔斷器：
+正式 `browser` transport 使用標準 Playwright，只處理一般瀏覽器 JavaScript。偵測到未解除的 challenge 後會啟動共用熔斷器：
 
 ```bash
 partsouq-crawler crawl-all \
   --run-id partsouq-browser-live \
   --seed-url 'https://partsouq.com/en/catalog/genuine' \
   --max-pages 10 --max-depth 0 \
-  --concurrency 1 --delay 5 --retry-count 0 \
+  --concurrency 1 --delay 30 --retry-count 0 \
   --robots-policy require \
   --transport browser \
-  --browser-executable '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser'
+  --browser-headless
 ```
 
-Playwright、Patchright、SeleniumBase UC 與 NoDriver 是替代方案，不應疊在同一個 browser session。本次實測只有 NoDriver + headed Google Chrome 在本機成功取得 200；SeleniumBase 在 WebDriver 啟動階段逾時，沒有取得網站結果。正式路徑使用獨立 Python 3.12 worker、持久 profile、Chrome 自己的 network stack 與 CDP response body；不把 cookie 搬到 aiohttp，也不使用人工 CAPTCHA、付費 bypass API 或 proxy。
+研究期間也分別測過 Patchright、SeleniumBase 與 NoDriver；它們不是正式月排程依賴，也不會疊在同一個 browser session。NoDriver 的部分成功只證明該次本機 session 可讀到部分頁面，不能外推成 Linux server 或全量保證；其 AGPL-3.0 授權也需另行審查。所有 transport 都禁止人工 CAPTCHA、stealth 指紋偽裝、代理輪替、付費 bypass API 或把 `cf_clearance` 搬到 HTTP client。
 
-```bash
-partsouq-crawler crawl-all \
-  --run-id partsouq-nodriver-live \
-  --seed-url 'https://partsouq.com/en/catalog/genuine' \
-  --max-pages 10 --max-depth 0 --concurrency 1 --delay 5 \
-  --robots-policy require --transport nodriver \
-  --browser-executable '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' \
-  --browser-profile-dir output/partsouq/browser-profile \
-  --browser-worker-command '.venv-browser/bin/python browser_worker/worker.py'
-```
-
-NoDriver 0.50.3 是 AGPL-3.0；部署或散布前必須自行完成授權審查。偵測到尚未解除的 challenge 時，raw body 仍會先入庫，該次 run 立即停止。月排程只會以同一 profile 每 30 分鐘做最多 3 次 bounded retry，不會密集重試 403。
+正式月排程固定單 worker，主頁導航至少間隔 30 秒（最多 120 次／小時），一般暫時錯誤最多重試 1 次；429 至少冷卻 6 小時。Cloudflare challenge 不重試：保存 raw 後立即停止 PartSouq source，後續 recovery 只續 NHTSA 等未完成來源，同月份不再送第二個 PartSouq canary。
 
 ## 每月無人值守排程
 
-正式範本在 `deploy/systemd/`。首次執行時間是台北時間每月 1 日 01:00；1 日 02:00 至 3 日 23:00 每小時做冪等恢復檢查，處理斷電、主機重開或 process hard kill。已完成或仍持有 lease 時會快速 no-op。
+正式範本在 `deploy/systemd/`。首次執行時間是台北時間每月 1 日 01:00；1 日 13:00 至 3 日 13:00 每 12 小時做冪等恢復檢查，處理斷電、主機重開或 process hard kill。已完成或仍持有 lease 時會快速 no-op。
 
 ```bash
 sudo install -m 0644 deploy/systemd/partsouq-monthly-sync.service /etc/systemd/system/
@@ -97,14 +84,14 @@ sudo systemctl enable --now partsouq-monthly-sync.timer
 systemctl list-timers partsouq-monthly-sync.timer
 ```
 
-排程依序執行 NHTSA bulk、NHTSA API、站方資料投影／VIN 佇列／對帳、PartSouq live。`monthly_sync_runs` 以 `YYYY-MM` 唯一，避免同月重複；lease、heartbeat 與 fencing token 避免雙主。完成的 source 在後續 attempt 會 skip，只續未完成來源。stdout/stderr 同時進 journald 與 `monthly_sync_events`。
+排程依序執行 NHTSA bulk、NHTSA API、站方資料投影／VIN 佇列／對帳、PartSouq live。NHTSA bulk、API 與 VIN batch request 都至少間隔 1 秒。NHTSA API 遇到 429、408 或暫時性 5xx 時最多低頻重試 3 次，至少退避 30／60／120 秒並優先遵守更長的 `Retry-After`；每次重試也計入 500-request safety budget 與結構化 log。`monthly_sync_runs` 以 `YYYY-MM` 唯一，避免同月重複；lease、heartbeat 與 fencing token 避免雙主。完成的 source 在後續 attempt 會 skip，只續未完成來源。`crawl_policy`、response、retry、429 與 challenge 熔斷事件會同時進 journald 與 `monthly_sync_events`。
 
 ```bash
 partsouq-crawler monthly-status --period 2026-08 --event-limit 200
 journalctl -u partsouq-monthly-sync.service --since '2026-08-01'
 ```
 
-正式 host 必須使用 headed Chrome + Xvfb、非 root service user、持久 profile、`PARTSOUQ_BROWSER_SANDBOX=1`。排程腳本會拒絕 true headless 與 `--no-sandbox`。在啟用 timer 前，必須在同一台 host 實跑一頁 `probe` 並確認 HTTP 200；Docker 測試路徑已證明不合格，不是 production fallback。
+正式 host 使用標準 headless Playwright、非 root service user 與瀏覽器 sandbox。排程腳本拒絕 headed monthly browser，避免無人值守時依賴 Xvfb／人工桌面。若 canary 是 challenge，當月狀態會是 `completed_with_gaps`，NHTSA 仍可完成；不得把 process 結束誤寫成 PartSouq live 全量成功。
 
 ## PartSouq 歷史 archive
 
@@ -154,13 +141,16 @@ partsouq-crawler problem-urls --run-id partsouq-genuine-full --format jsonl
 
 partsouq-crawler dump-response --response-id 1 --output output/response-1.html
 partsouq-crawler reparse --response-id 1
+partsouq-crawler reparse --batch-size 250
+partsouq-crawler repair-taxonomy
+partsouq-crawler repair-taxonomy --apply
 partsouq-crawler export --output output/fitments.csv
 partsouq-crawler export \
   --output output/historical.jsonl \
   --include-unverified-fitments
 ```
 
-Export 使用 `(record_id, provenance_id)` keyset，每批 1,000 筆，不會一次載入全表。預設遮蔽 URL 裡的 `ssd`、VIN 與 17 碼 VIN 值；只有確定檔案留在本機時，才可明確加 `--include-sensitive-source-urls`。
+全量 reparse 以 response ID keyset 每批 250 筆讀 raw body，不會一次載入全部壓縮內容。`repair-taxonomy` 預設只預覽 parser v2 誤收的 `Genuine Parts Catalogs > ...` 導覽節點；只有 `--apply` 才會在確認沒有 diagram 連結後刪除舊 normalized 節點，raw response 不受影響。Export 每個 normalized record 只選最新版 parser 的一筆 provenance，並以 record ID keyset 每批 1,000 筆輸出；完整來源歷程仍保留在 DB 與後台 detail。預設遮蔽 URL 裡的 `ssd`、VIN 與 17 碼 VIN 值；只有確定檔案留在本機時，才可明確加 `--include-sensitive-source-urls`。
 
 `strict_complete=true` 必須同時滿足：queue 耗盡、無 failed／challenged／robots skip／parse failure、provenance 完整、foreign key 完整。Archive run 永遠會明確標示不是 current/full。
 
@@ -172,7 +162,7 @@ partsouq-admin
 open http://127.0.0.1:8086/
 ```
 
-後台可瀏覽、搜尋、人工建立、更新、停用及恢復以下十種資料：車型、零件分類、分解圖、料號、零件出現紀錄、適用關係、零件中英／俗稱、VIN 車型、VIN 適用零件、對帳案件。也可將 17 碼 VIN 加入持久解碼佇列；`station-sync` 或月排程會呼叫 NHTSA vPIC、保存 raw JSON 與 SHA-256，再建立 VIN 車型資料。
+後台可瀏覽、搜尋、人工建立、更新、停用及恢復以下十種資料：車型、零件分類、分解圖、料號、零件出現紀錄、適用關係、零件中英／俗稱、VIN 車型、VIN 適用零件、對帳案件。也可將 17 碼 VIN 加入持久解碼佇列；`station-sync` 或月排程會呼叫 NHTSA vPIC、保存 raw JSON 與 SHA-256，再建立 VIN 車型資料。VIN 正規化欄位包含品牌、型號、年份、Trim、引擎形式、汽缸數、排氣量、引擎型號／製造商、燃料、驅動方式、變速箱與生產國；其他官方欄位仍保留在 raw JSON。`/monitoring` 是唯讀爬蟲監控頁，顯示 monthly source 狀態、PartSouq queue／response、429／challenge 與最近 100 筆 DB event。
 
 Crawler source tables 對 `partsouq_admin` 只有 `SELECT`；所有人工異動寫入 overlay 與 append-only audit event，不會改掉 raw source fact。VIN 對應到 PartSouq 車型必須由站方明確選定 `partsouq_vehicle_configuration_id`，不做模糊字串自動配對；只有完成連結後才投影 VIN 適用零件，且預設仍是未驗證。
 
@@ -187,7 +177,7 @@ export PARTSOUQ_ADMIN_SECURE_COOKIE=1
 .venv/bin/gunicorn --bind 127.0.0.1:8086 'partsouq_crawler.admin.app:create_app()'
 ```
 
-可直接安裝 `deploy/systemd/partsouq-admin.service` 與 `deploy/systemd/admin.env.example`。列表固定 3 條 SQL，detail 固定 4 條 SQL，來源 URL 裡的 `ssd`／VIN 在畫面預設遮蔽。
+可直接安裝 `deploy/systemd/partsouq-admin.service` 與 `deploy/systemd/admin.env.example`。列表固定 3 條 SQL，detail 固定 4 條 SQL，監控頁固定 3 條聚合 SQL；來源 URL 裡的 `ssd`／VIN 在畫面預設遮蔽。
 
 列表使用 keyset 分頁與批次載入。Query tag／fingerprint 由測試固定，資料量或 fanout 增加時不會形成 N+1。
 

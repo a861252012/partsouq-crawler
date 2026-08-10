@@ -115,6 +115,63 @@ class ScriptedDatabase:
             ]
         if tag == "dashboard.override-counts":
             return []
+        if tag == "monitor.monthly-runs":
+            return [
+                {
+                    "id": 1,
+                    "period_key": "2099-01",
+                    "status": "running",
+                    "attempts": 1,
+                    "max_attempts": 3,
+                    "nhtsa_bulk_status": "completed",
+                    "nhtsa_api_status": "completed",
+                    "station_status": "completed",
+                    "partsouq_status": "running",
+                    "scheduled_for": "2098-12-31 17:00:00",
+                    "started_at": "2098-12-31 17:00:00",
+                    "heartbeat_at": "2098-12-31 17:01:00",
+                    "ended_at": None,
+                    "last_error": None,
+                }
+            ]
+        if tag == "monitor.crawl-runs":
+            return [
+                {
+                    "id": 2,
+                    "run_key": "monthly-2099-01-partsouq",
+                    "status": "running",
+                    "blocked_reason": None,
+                    "started_at": "2098-12-31 17:00:00",
+                    "updated_at": "2098-12-31 17:01:00",
+                    "ended_at": None,
+                    "config_json": '{"delay_seconds":30}',
+                    "discovered": 20,
+                    "pending": 10,
+                    "in_progress": 1,
+                    "done": 9,
+                    "failed": 0,
+                    "challenged": 0,
+                    "max_attempts": 1,
+                    "responses": 10,
+                    "rate_limited": 0,
+                    "challenge_responses": 0,
+                    "average_elapsed_ms": 800,
+                    "first_response_at": "2098-12-31 17:00:00",
+                    "last_response_at": "2098-12-31 17:05:00",
+                }
+            ]
+        if tag == "monitor.events":
+            return [
+                {
+                    "id": 3,
+                    "period_key": "2099-01",
+                    "source_name": "partsouq",
+                    "level": "info",
+                    "event_type": "crawl_policy",
+                    "message": "crawl_policy",
+                    "occurred_at": "2098-12-31 17:00:00",
+                }
+            ]
         return []
 
     def execute(

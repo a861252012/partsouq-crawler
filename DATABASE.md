@@ -68,7 +68,7 @@ reconciliation_cases ──► admin override/audit
 | `part_term_mappings` | PartSouq 英文零件名稱投影、站方中文名稱與中文俗稱的對照工作集。中文缺值不會自動杜撰。 |
 | `vin_decode_requests` | 站方輸入 VIN 的持久 queue；attempt、lease、worker 與 fencing 防止重複完成。 |
 | `vin_decode_responses` | NHTSA vPIC batch raw JSON、HTTP status、headers、bytes 與 SHA-256。 |
-| `vin_vehicle_mappings` | VIN → 品牌、型號、系列／車身樣式、年份；可由站方明確連結 PartSouq vehicle。 |
+| `vin_vehicle_mappings` | VIN → 品牌、型號、系列／車身樣式、年份、Trim、引擎形式／汽缸數／排氣量／型號／製造商、燃料、驅動、變速箱、生產國；可由站方明確連結 PartSouq vehicle。 |
 | `vin_part_fitments` | VIN 完成 PartSouq vehicle 連結後投影的料號適用關係；預設未驗證。 |
 | `reconciliation_cases` | 缺中文名稱、缺 VIN→PartSouq vehicle 連結等對帳待辦與證據。 |
 
@@ -147,7 +147,7 @@ source tables (SELECT only for partsouq_admin)
 - `part_term_mappings`、`vin_vehicle_mappings`、`vin_part_fitments`、`reconciliation_cases` 也是 source record；站方修改仍只進 overlay/audit。
 - 對帳案件的 `current_json`、`candidate_json`、`evidence_json` 保留機器資料；站方可覆寫狀態、嚴重度、留言、負責人與結案說明。
 
-後台列表先用 keyset query 找當頁 key，再用兩次固定 batch query 取得 source/manual payload；每頁恰好 3 次 SQL。Source prefix search 先走各欄 index 的 `UNION` candidate set，只有小型 overlay 表做 JSON substring search。
+後台列表先用 keyset query 找當頁 key，再用兩次固定 batch query 取得 source/manual payload；每頁恰好 3 次 SQL。Source prefix search 先走各欄 index 的 `UNION` candidate set，只有小型 overlay 表做 JSON substring search。唯讀 `/monitoring` 也固定 3 次 SQL，顯示 monthly run/event 與 PartSouq queue／response／429／challenge，不修改任何 source 或 audit table。
 
 ## NHTSA MySQL
 

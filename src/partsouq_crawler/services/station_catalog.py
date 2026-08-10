@@ -356,6 +356,16 @@ class StationCatalogService:
                     self._optional_text(result.get("VehicleType")),
                     year,
                     self._optional_text(result.get("Manufacturer")),
+                    self._optional_text(result.get("Trim")),
+                    self._optional_text(result.get("EngineConfiguration")),
+                    self._optional_text(result.get("EngineCylinders")),
+                    self._optional_text(result.get("DisplacementL")),
+                    self._optional_text(result.get("EngineModel")),
+                    self._optional_text(result.get("EngineManufacturer")),
+                    self._optional_text(result.get("FuelTypePrimary")),
+                    self._optional_text(result.get("DriveType")),
+                    self._optional_text(result.get("TransmissionStyle")),
+                    self._optional_text(result.get("PlantCountry")),
                     (
                         "decoded"
                         if make and model and year
@@ -400,10 +410,13 @@ class StationCatalogService:
                     """
                     INSERT INTO vin_vehicle_mappings(
                         vin, make_name, model_name, series_name, body_class,
-                        vehicle_type, model_year, manufacturer_name, decode_status,
-                        error_code, error_text, source_kind, response_id,
+                        vehicle_type, model_year, manufacturer_name, trim_name,
+                        engine_configuration, engine_cylinders,
+                        displacement_l_raw, engine_model, engine_manufacturer,
+                        fuel_type_primary, drive_type, transmission_style, plant_country,
+                        decode_status, error_code, error_text, source_kind, response_id,
                         decoded_at, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                               'nhtsa_vpic', ?, UTC_TIMESTAMP(6),
                               UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))
                     ON DUPLICATE KEY UPDATE
@@ -411,6 +424,16 @@ class StationCatalogService:
                         series_name = VALUES(series_name), body_class = VALUES(body_class),
                         vehicle_type = VALUES(vehicle_type), model_year = VALUES(model_year),
                         manufacturer_name = VALUES(manufacturer_name),
+                        trim_name = VALUES(trim_name),
+                        engine_configuration = VALUES(engine_configuration),
+                        engine_cylinders = VALUES(engine_cylinders),
+                        displacement_l_raw = VALUES(displacement_l_raw),
+                        engine_model = VALUES(engine_model),
+                        engine_manufacturer = VALUES(engine_manufacturer),
+                        fuel_type_primary = VALUES(fuel_type_primary),
+                        drive_type = VALUES(drive_type),
+                        transmission_style = VALUES(transmission_style),
+                        plant_country = VALUES(plant_country),
                         decode_status = VALUES(decode_status), error_code = VALUES(error_code),
                         error_text = VALUES(error_text), source_kind = VALUES(source_kind),
                         response_id = VALUES(response_id), decoded_at = UTC_TIMESTAMP(6),

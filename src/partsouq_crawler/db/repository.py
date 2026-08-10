@@ -1499,6 +1499,17 @@ class Repository:
                 ),
             )
 
+    async def clear_parse_failures(self, response_id: int, parser_name: str) -> int:
+        async with self.transaction() as connection:
+            cursor = await connection.execute(
+                """
+                DELETE FROM parse_failures
+                WHERE response_id = ? AND parser_name = ?
+                """,
+                (response_id, parser_name),
+            )
+        return max(int(cursor.rowcount), 0)
+
     async def body_by_response(
         self, response_id: int
     ) -> tuple[DatabaseRow | aiosqlite.Row, bytes] | None:
@@ -1576,6 +1587,8 @@ class Repository:
         url: str | None = None,
         sha256: str | None = None,
         run_id: int | None = None,
+        after_id: int | None = None,
+        limit: int | None = None,
     ) -> list[DatabaseRow | aiosqlite.Row]:
         clauses: list[str] = []
         parameters: list[object] = []
@@ -1588,14 +1601,25 @@ class Repository:
             if value is not None:
                 clauses.append(f"{column} = ?")
                 parameters.append(value)
+        if after_id is not None:
+            clauses.append("h.id > ?")
+            parameters.append(after_id)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        limit_sql = ""
+        if limit is not None:
+            if limit <= 0:
+                raise ValueError("limit must be positive")
+            limit_sql = "LIMIT ?"
+            parameters.append(limit)
         cursor = await self.connection.execute(
             f"""
-            SELECT h.*, b.compression, b.body_blob
+            SELECT h.*, b.compression, b.body_blob, ac.archive_source
             FROM http_responses h
             JOIN response_bodies b ON b.sha256 = h.body_sha256
+            LEFT JOIN archive_captures ac ON ac.response_id = h.id
             {where}
             ORDER BY h.id
+            {limit_sql}
             """,  # noqa: S608 - clauses are selected from fixed column names.
             parameters,
         )
@@ -1622,6 +1646,20 @@ class Repository:
         for row in await cursor.fetchall():
             counts[str(row["status"])] = int(row["count"])
         return counts
+
+    async def runnable_queue_count(self, run_id: int, *, max_depth: int) -> int:
+        cursor = await self.connection.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM crawl_queue
+            WHERE run_id = ? AND status = 'pending'
+              AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+              AND (? = 0 OR depth <= ?)
+            """,
+            (run_id, utc_now(), max_depth, max_depth),
+        )
+        row = await cursor.fetchone()
+        return int(row["count"]) if row else 0
 
     async def refresh_run_counters(self, run_id: int) -> None:
         counts = await self.queue_counts(run_id)

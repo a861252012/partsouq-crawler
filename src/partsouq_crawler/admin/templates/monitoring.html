@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}爬蟲監控｜汽車資料站方後台{% endblock %}
+{% block content %}
+  <div class="page-title">
+    <div>
+      <h1>爬蟲監控</h1>
+      <p>唯讀顯示每月排程、PartSouq queue／response 與最近事件；來源資料不會在本頁被修改。</p>
+    </div>
+  </div>
+
+  <section>
+    <h2>每月 NHTSA／PartSouq 執行</h2>
+    <div class="table-wrap"><table class="monitor-table">
+      <thead><tr><th>月份</th><th>狀態</th><th>嘗試</th><th>NHTSA bulk</th><th>NHTSA API</th><th>站方投影</th><th>PartSouq</th><th>開始／心跳／結束</th><th>錯誤</th></tr></thead>
+      <tbody>
+        {% for run in monitor.monthly_runs %}
+          <tr>
+            <td>{{ run.period_key }}</td><td><span class="badge">{{ run.status }}</span></td><td>{{ run.attempts }}/{{ run.max_attempts }}</td>
+            <td>{{ run.nhtsa_bulk_status }}</td><td>{{ run.nhtsa_api_status }}</td><td>{{ run.station_status }}</td><td>{{ run.partsouq_status }}</td>
+            <td>{{ run.started_at or '—' }}<br>{{ run.heartbeat_at or '—' }}<br>{{ run.ended_at or '—' }}</td><td>{{ run.last_error or '—' }}</td>
+          </tr>
+        {% else %}<tr><td colspan="9" class="empty">尚無正式每月執行紀錄。</td></tr>{% endfor %}
+      </tbody>
+    </table></div>
+  </section>
+
+  <section>
+    <h2>PartSouq crawl queue 與 request</h2>
+    <div class="table-wrap"><table class="monitor-table">
+      <thead><tr><th>Run</th><th>狀態</th><th>Queue</th><th>Response</th><th>429／challenge</th><th>平均耗時</th><th>第一／最後 response</th><th>阻擋原因</th></tr></thead>
+      <tbody>
+        {% for run in monitor.crawl_runs %}
+          <tr>
+            <td>{{ run.run_key }}</td><td><span class="badge">{{ run.status }}</span></td>
+            <td>發現 {{ run.discovered }}<br>pending {{ run.pending }}／running {{ run.in_progress }}／done {{ run.done }}／failed {{ run.failed }}／challenged {{ run.challenged }}</td>
+            <td>{{ run.responses }}<br>最多 attempt {{ run.max_attempts }}</td><td>{{ run.rate_limited }}／{{ run.challenge_responses }}</td>
+            <td>{{ run.average_elapsed_ms }} ms</td><td>{{ run.first_response_at or '—' }}<br>{{ run.last_response_at or '—' }}</td><td>{{ run.blocked_reason or '—' }}</td>
+          </tr>
+        {% else %}<tr><td colspan="8" class="empty">尚無 PartSouq crawl run。</td></tr>{% endfor %}
+      </tbody>
+    </table></div>
+  </section>
+
+  <section>
+    <h2>最近 100 筆執行事件</h2>
+    <div class="table-wrap"><table class="monitor-table">
+      <thead><tr><th>時間</th><th>月份</th><th>來源</th><th>層級</th><th>事件</th><th>訊息</th></tr></thead>
+      <tbody>
+        {% for event in monitor.events %}
+          <tr><td>{{ event.occurred_at }}</td><td>{{ event.period_key }}</td><td>{{ event.source_name }}</td><td>{{ event.level }}</td><td>{{ event.event_type }}</td><td>{{ event.message }}</td></tr>
+        {% else %}<tr><td colspan="6" class="empty">尚無 monthly event。</td></tr>{% endfor %}
+      </tbody>
+    </table></div>
+  </section>
+{% endblock %}

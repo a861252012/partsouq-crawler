@@ -30,6 +30,7 @@ def create_fetch_transport(
             executable_path=config.browser_executable,
             headless=config.browser_headless,
             user_agent=config.user_agent or None,
+            challenge_wait_seconds=config.browser_challenge_wait_seconds,
         )
     if config.transport == "nodriver":
         if (

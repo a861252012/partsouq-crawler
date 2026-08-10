@@ -170,7 +170,7 @@ def test_monthly_sync_records_spawn_failure_instead_of_losing_the_run() -> None:
     asyncio.run(scenario())
 
 
-def test_monthly_sync_retries_blocked_source_but_stops_at_attempt_limit() -> None:
+def test_monthly_sync_seals_blocked_source_without_another_canary() -> None:
     import asyncio
 
     async def run_attempt(attempts: int) -> tuple[dict[str, object], FakeMonthlyRepository]:
@@ -200,18 +200,25 @@ def test_monthly_sync_retries_blocked_source_but_stops_at_attempt_limit() -> Non
         return report, fake
 
     first, first_repo = asyncio.run(run_attempt(1))
-    final, final_repo = asyncio.run(run_attempt(3))
+    resumed, resumed_repo = asyncio.run(run_attempt(2))
 
-    assert first["status"] == "failed"
-    assert first["exit_code"] == 1
+    assert first["status"] == "completed_with_gaps"
+    assert first["exit_code"] == 2
     assert first_repo.finished is not None
-    assert first_repo.finished["status"] == "failed"
-    assert final["status"] == "completed_with_gaps"
-    assert final["exit_code"] == 2
-    assert final_repo.finished is not None
-    assert final_repo.finished["status"] == "completed_with_gaps"
+    assert first_repo.finished["status"] == "completed_with_gaps"
+    assert ("partsouq", "blocked", "partsouq") in first_repo.source_updates
+    assert not any(
+        event.get("event_type") == "progress" and event.get("source_name") == "partsouq"
+        for event in first_repo.events
+    )
+    assert resumed["status"] == "completed_with_gaps"
+    assert resumed["exit_code"] == 2
+    assert resumed_repo.finished is not None
+    assert resumed_repo.finished["status"] == "completed_with_gaps"
     assert first_repo.requeued == []
-    assert final_repo.requeued == [("partsouq", ("challenged",))]
+    assert resumed_repo.requeued == []
+    assert any(event["event_type"] == "source_skipped_blocked" for event in resumed_repo.events)
+    assert not any(update[0] == "partsouq" for update in resumed_repo.source_updates)
 
 
 def test_monthly_sync_does_not_start_when_period_is_already_owned() -> None:
@@ -334,9 +341,14 @@ def test_monthly_sync_terminates_child_when_log_persistence_fails() -> None:
     asyncio.run(scenario())
 
 
-def test_monthly_cli_uses_taipei_schedule_and_headed_nodriver(monkeypatch) -> None:
+def test_monthly_cli_uses_taipei_schedule_and_low_frequency_browser_canary(monkeypatch) -> None:
     monkeypatch.setenv("PARTSOUQ_BROWSER_EXECUTABLE", "/usr/bin/google-chrome")
-    monkeypatch.setenv("PARTSOUQ_BROWSER_WORKER_COMMAND", "worker-python worker.py")
+    monkeypatch.setenv("PARTSOUQ_BROWSER_HEADLESS", "1")
+    monkeypatch.setenv("PARTSOUQ_TRANSPORT", "browser")
+    monkeypatch.setenv("PARTSOUQ_USER_AGENT", "monthly-crawler (contact: ops@example.com)")
+    monkeypatch.setenv("PARTSOUQ_DELAY_SECONDS", "0.1")
+    monkeypatch.setenv("PARTSOUQ_MAX_RETRIES", "9")
+    monkeypatch.setenv("NHTSA_API_DELAY_SECONDS", "0.1")
     period, scheduled = _monthly_period("2026-08", "Asia/Taipei")
     commands = _monthly_commands(
         period,
@@ -346,9 +358,19 @@ def test_monthly_cli_uses_taipei_schedule_and_headed_nodriver(monkeypatch) -> No
 
     assert scheduled == "2026-07-31T17:00:00+00:00"
     assert "--transport" in partsouq.command
-    assert partsouq.command[partsouq.command.index("--transport") + 1] == "nodriver"
-    assert "--browser-headless" not in partsouq.command
-    assert "--retry-challenges" in partsouq.command
+    assert partsouq.command[partsouq.command.index("--transport") + 1] == "browser"
+    assert "--browser-headless" in partsouq.command
+    assert "--retry-challenges" not in partsouq.command
+    assert "--browser-worker-command" not in partsouq.command
+    assert partsouq.command[partsouq.command.index("--delay") + 1] == "30.0"
+    assert partsouq.command[partsouq.command.index("--retry-count") + 1] == "1"
+    assert partsouq.command[partsouq.command.index("--robots-policy") + 1] == "require"
+    assert partsouq.command[partsouq.command.index("--user-agent") + 1] == (
+        "monthly-crawler (contact: ops@example.com)"
+    )
+    assert commands[0].environment["NHTSA_API_DELAY_SECONDS"] == "1.0"
+    assert commands[1].environment["NHTSA_API_DELAY_SECONDS"] == "1.0"
+    assert commands[2].environment["NHTSA_API_DELAY_SECONDS"] == "1.0"
     assert "not-on-process-list" not in partsouq.command
     assert partsouq.environment["PARTSOUQ_MYSQL_PASSWORD"] == "not-on-process-list"
     args = build_parser().parse_args(["monthly-sync", "--period", "2026-08"])

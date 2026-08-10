@@ -49,6 +49,16 @@ class FakeVinDecoder:
                 "VehicleType": "PASSENGER CAR",
                 "ModelYear": "1991",
                 "Manufacturer": "AMERICAN HONDA MOTOR CO., INC.",
+                "Trim": "LX",
+                "EngineConfiguration": "In-Line",
+                "EngineCylinders": "4",
+                "DisplacementL": "1.5",
+                "EngineModel": "D15B2",
+                "EngineManufacturer": "Honda",
+                "FuelTypePrimary": "Gasoline",
+                "DriveType": "4x2",
+                "TransmissionStyle": "Automatic",
+                "PlantCountry": "UNITED STATES (USA)",
                 "ErrorCode": "0",
                 "ErrorText": "0 - VIN decoded clean.",
             }
@@ -172,7 +182,10 @@ def test_station_sync_decodes_vin_preserves_raw_response_and_is_idempotent() -> 
             cursor = await repository.connection.execute(
                 """
                 SELECT q.status, q.attempts, vm.make_name, vm.model_name, vm.model_year,
-                       vm.decode_status, vr.http_status, vr.body_sha256,
+                       vm.trim_name, vm.engine_configuration, vm.engine_cylinders,
+                       vm.displacement_l_raw, vm.engine_model, vm.engine_manufacturer,
+                       vm.fuel_type_primary, vm.drive_type, vm.transmission_style,
+                       vm.plant_country, vm.decode_status, vr.http_status, vr.body_sha256,
                        SHA2(vr.body_json, 256) AS actual_body_sha256
                 FROM vin_decode_requests AS q
                 JOIN vin_vehicle_mappings AS vm ON vm.id = q.mapping_id
@@ -188,6 +201,16 @@ def test_station_sync_decodes_vin_preserves_raw_response_and_is_idempotent() -> 
             assert row["make_name"] == "HONDA"
             assert row["model_name"] == "CIVIC"
             assert int(row["model_year"]) == 1991
+            assert row["trim_name"] == "LX"
+            assert row["engine_configuration"] == "In-Line"
+            assert row["engine_cylinders"] == "4"
+            assert row["displacement_l_raw"] == "1.5"
+            assert row["engine_model"] == "D15B2"
+            assert row["engine_manufacturer"] == "Honda"
+            assert row["fuel_type_primary"] == "Gasoline"
+            assert row["drive_type"] == "4x2"
+            assert row["transmission_style"] == "Automatic"
+            assert row["plant_country"] == "UNITED STATES (USA)"
             assert row["decode_status"] == "decoded"
             assert int(row["http_status"]) == 200
             assert row["body_sha256"] == row["actual_body_sha256"]

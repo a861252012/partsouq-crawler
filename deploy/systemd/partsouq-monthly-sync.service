@@ -2,7 +2,7 @@
 Description=Monthly NHTSA and PartSouq data synchronization
 After=network-online.target mysql.service
 Wants=network-online.target
-StartLimitIntervalSec=12h
+StartLimitIntervalSec=3d
 StartLimitBurst=4
 
 [Service]
@@ -14,7 +14,7 @@ EnvironmentFile=/etc/partsouq-crawler/monthly.env
 ExecStart=/opt/partsouq-crawler/current/scripts/run_monthly_sync.sh
 TimeoutStartSec=infinity
 Restart=on-failure
-RestartSec=30min
+RestartSec=12h
 SuccessExitStatus=2
 KillSignal=SIGTERM
 KillMode=control-group

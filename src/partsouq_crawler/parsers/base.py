@@ -24,7 +24,7 @@ from partsouq_crawler.parsers.brands.renault import RenaultBrandAdapter
 from partsouq_crawler.parsers.brands.toyota import ToyotaBrandAdapter
 from partsouq_crawler.parsers.common import clean_text, parse_unambiguous_range
 
-PARSER_VERSION = "2"
+PARSER_VERSION = "3"
 RecordT = TypeVar("RecordT")
 
 
@@ -51,7 +51,8 @@ class CatalogParser:
         adapter = self._adapter(metadata)
         parsed.vehicle = adapter.adapt(metadata)
         parsed.taxonomies = self._taxonomies(document)
-        parsed.diagrams = self._diagrams(document, metadata)
+        category_path = parsed.taxonomies[-1].path if parsed.taxonomies else ()
+        parsed.diagrams = self._diagrams(document, metadata, category_path)
         parsed.parts = self._parts(document, metadata)
         if page_type == "search":
             parsed.compatibility_hints = self._compatibility_hints(document, url)
@@ -114,6 +115,8 @@ class CatalogParser:
     @staticmethod
     def _taxonomies(document: HtmlElement) -> list[TaxonomyRecord]:
         path = CatalogParser._breadcrumb(document)
+        if path and path[0].lower().startswith("genuine parts catalog"):
+            path = path[3:]
         return [TaxonomyRecord(tuple(path))] if path else []
 
     @staticmethod
@@ -129,7 +132,12 @@ class CatalogParser:
                 path.append(value)
         return path
 
-    def _diagrams(self, document: HtmlElement, metadata: dict[str, str]) -> list[DiagramRecord]:
+    def _diagrams(
+        self,
+        document: HtmlElement,
+        metadata: dict[str, str],
+        category_path: tuple[str, ...],
+    ) -> list[DiagramRecord]:
         records: list[DiagramRecord] = []
         for table in document.xpath("//table"):
             headers = self._table_headers(table)
@@ -146,11 +154,12 @@ class CatalogParser:
                     parsed_range = parse_unambiguous_range(range_raw)
                     records.append(
                         DiagramRecord(
-                            code,
-                            name,
-                            range_raw,
-                            parsed_range.start,
-                            parsed_range.end,
+                            code_raw=code,
+                            name_raw=name,
+                            range_raw=range_raw,
+                            diagram_from=parsed_range.start,
+                            diagram_to=parsed_range.end,
+                            category_path=category_path,
                         )
                     )
         if not records:
@@ -161,7 +170,14 @@ class CatalogParser:
             if code or name:
                 parsed_range = parse_unambiguous_range(range_raw)
                 records.append(
-                    DiagramRecord(code, name, range_raw, parsed_range.start, parsed_range.end)
+                    DiagramRecord(
+                        code_raw=code,
+                        name_raw=name,
+                        range_raw=range_raw,
+                        diagram_from=parsed_range.start,
+                        diagram_to=parsed_range.end,
+                        category_path=category_path,
+                    )
                 )
         if not records:
             for heading in document.xpath(
@@ -170,7 +186,13 @@ class CatalogParser:
             ):
                 name = clean_text(heading.text_content())
                 if name:
-                    records.append(DiagramRecord(None, name))
+                    records.append(
+                        DiagramRecord(
+                            code_raw=None,
+                            name_raw=name,
+                            category_path=category_path,
+                        )
+                    )
         return self._unique(records)
 
     def _parts(self, document: HtmlElement, metadata: dict[str, str]) -> list[PartRecord]:
@@ -188,7 +210,7 @@ class CatalogParser:
                 "callout": self._header_index(headers, ("callout", "ref", "position", "code")),
                 "quantity": self._header_index(headers, ("quantity", "qty", "qty required")),
                 "range": self._header_index(headers, ("part range", "range", "date_range")),
-                "condition": self._header_index(headers, ("condition", "applicability")),
+                "condition": self._header_index(headers, ("condition", "applicability", "options")),
                 "note": self._header_index(headers, ("note", "remarks")),
             }
             diagram_name = self._containing_diagram_name(table)

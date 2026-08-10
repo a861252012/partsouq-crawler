@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_SEED = "https://partsouq.com/en/catalog/genuine"
+DEFAULT_PARTSOUQ_DELAY_SECONDS = 30.0
+DEFAULT_PARTSOUQ_MAX_RETRIES = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,9 +77,9 @@ class PartSouqMySQLConfig:
 class CrawlerConfig:
     database: Path = Path("mysql")
     concurrency: int = 1
-    delay_seconds: float = 5.0
+    delay_seconds: float = DEFAULT_PARTSOUQ_DELAY_SECONDS
     request_timeout_seconds: float = 30.0
-    max_retries: int = 3
+    max_retries: int = DEFAULT_PARTSOUQ_MAX_RETRIES
     max_pages: int = 0
     max_depth: int = 0
     user_agent: str = ""
@@ -98,9 +100,13 @@ class CrawlerConfig:
         values: dict[str, object] = {
             "database": Path("mysql"),
             "concurrency": int(os.getenv("PARTSOUQ_CONCURRENCY", "1")),
-            "delay_seconds": float(os.getenv("PARTSOUQ_DELAY_SECONDS", "5")),
+            "delay_seconds": float(
+                os.getenv("PARTSOUQ_DELAY_SECONDS", str(DEFAULT_PARTSOUQ_DELAY_SECONDS))
+            ),
             "request_timeout_seconds": float(os.getenv("PARTSOUQ_REQUEST_TIMEOUT_SECONDS", "30")),
-            "max_retries": int(os.getenv("PARTSOUQ_MAX_RETRIES", "3")),
+            "max_retries": int(
+                os.getenv("PARTSOUQ_MAX_RETRIES", str(DEFAULT_PARTSOUQ_MAX_RETRIES))
+            ),
             "user_agent": os.getenv("PARTSOUQ_USER_AGENT", ""),
             "transport": os.getenv("PARTSOUQ_TRANSPORT", "http"),
             "browser_executable": os.getenv("PARTSOUQ_BROWSER_EXECUTABLE") or None,
@@ -156,6 +162,8 @@ class CrawlerConfig:
             raise ValueError("delay must not be negative")
         if self.request_timeout_seconds <= 0:
             raise ValueError("timeout must be positive")
+        if self.max_retries < 0:
+            raise ValueError("retry count must not be negative")
         if self.max_pages < 0 or self.max_depth < 0:
             raise ValueError("max-pages and max-depth use 0 for unlimited")
         if self.robots_policy not in {"require", "ignore"}:

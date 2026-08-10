@@ -40,6 +40,8 @@ def test_config_from_env_and_validation(monkeypatch, tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         CrawlerConfig(request_timeout_seconds=0).validate()
     with pytest.raises(ValueError):
+        CrawlerConfig(max_retries=-1).validate()
+    with pytest.raises(ValueError):
         CrawlerConfig(max_pages=-1).validate()
     with pytest.raises(ValueError):
         CrawlerConfig(robots_policy="maybe").validate()

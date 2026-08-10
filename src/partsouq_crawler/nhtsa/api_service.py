@@ -7,7 +7,12 @@ from typing import Any
 
 from partsouq_crawler.logging import CrawlLogger
 from partsouq_crawler.nhtsa.api import NhtsaApiParser
-from partsouq_crawler.nhtsa.api_client import NhtsaApiClient
+from partsouq_crawler.nhtsa.api_client import (
+    NHTSA_API_MAX_TRANSIENT_RETRIES,
+    NhtsaApiClient,
+    NhtsaApiError,
+    nhtsa_transient_retry_delay,
+)
 from partsouq_crawler.nhtsa.config import NhtsaConfig
 from partsouq_crawler.nhtsa.datasets import CSSI_SOURCES, VPIC_FIXED_SOURCES, ApiSource
 from partsouq_crawler.nhtsa.models import ApiDocument
@@ -241,17 +246,38 @@ class NhtsaApiSyncService:
         client: NhtsaApiClient,
         source: ApiSource,
     ) -> ApiSourceImport:
-        self.request_count += 1
-        if self.request_count > API_REQUEST_BUDGET:
-            raise ValueError(f"NHTSA API request budget exceeded ({API_REQUEST_BUDGET})")
-        self._event(
-            "nhtsa_api_source_started",
-            source_key=source.key,
-            dataset=source.dataset_name,
-            request_number=self.request_count,
-        )
         current = self.repository.current_artifact(source.dataset_name, source.key)
-        download, body = await client.fetch(source, current_artifact=current)
+        source_attempt = 0
+        while True:
+            source_attempt += 1
+            self.request_count += 1
+            if self.request_count > API_REQUEST_BUDGET:
+                raise ValueError(f"NHTSA API request budget exceeded ({API_REQUEST_BUDGET})")
+            if source_attempt == 1:
+                self._event(
+                    "nhtsa_api_source_started",
+                    source_key=source.key,
+                    dataset=source.dataset_name,
+                    request_number=self.request_count,
+                )
+            try:
+                download, body = await client.fetch(source, current_artifact=current)
+                break
+            except NhtsaApiError as error:
+                if not error.retryable or source_attempt > NHTSA_API_MAX_TRANSIENT_RETRIES:
+                    raise
+                delay = nhtsa_transient_retry_delay(source_attempt, error.retry_after)
+                self._event(
+                    "nhtsa_api_retry_scheduled",
+                    source_key=source.key,
+                    dataset=source.dataset_name,
+                    request_number=self.request_count,
+                    source_attempt=source_attempt,
+                    status=error.status,
+                    delay_seconds=round(delay, 3),
+                    error_type=type(error).__name__,
+                )
+                await asyncio.sleep(delay)
         if download.reused_artifact_id is not None:
             if current is None:
                 raise ValueError("reused API response has no current artifact")
