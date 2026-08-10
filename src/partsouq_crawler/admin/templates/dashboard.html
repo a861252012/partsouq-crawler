@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}總覽｜汽車資料站方後台{% endblock %}
+{% block content %}
+  <div class="page-title">
+    <div>
+      <h1>資料總覽</h1>
+      <p>NHTSA、PartSouq 來源資料與站方修正分開保存；差異進入對帳頻道。</p>
+    </div>
+  </div>
+  <div class="cards">
+    {% for key, spec in entity_specs.items() %}
+      <a class="card" href="{{ url_for('admin.entity_list', entity_type=key) }}">
+        <h2>{{ spec.title }}</h2>
+        <strong>{{ counts[key].source }}</strong><span> 筆來源資料</span>
+        <dl>
+          <dt>人工新增</dt><dd>{{ counts[key].manual }}</dd>
+          <dt>來源覆寫</dt><dd>{{ counts[key].overrides }}</dd>
+          <dt>已停用</dt><dd>{{ counts[key].retired }}</dd>
+        </dl>
+      </a>
+    {% endfor %}
+  </div>
+{% endblock %}

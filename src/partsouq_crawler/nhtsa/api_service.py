@@ -5,8 +5,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from partsouq_crawler.logging import CrawlLogger
 from partsouq_crawler.nhtsa.api import NhtsaApiParser
-from partsouq_crawler.nhtsa.api_client import NhtsaApiClient
+from partsouq_crawler.nhtsa.api_client import (
+    NHTSA_API_MAX_TRANSIENT_RETRIES,
+    NhtsaApiClient,
+    NhtsaApiError,
+    nhtsa_transient_retry_delay,
+)
 from partsouq_crawler.nhtsa.config import NhtsaConfig
 from partsouq_crawler.nhtsa.datasets import CSSI_SOURCES, VPIC_FIXED_SOURCES, ApiSource
 from partsouq_crawler.nhtsa.models import ApiDocument
@@ -35,10 +41,12 @@ class NhtsaApiSyncService:
         config: NhtsaConfig,
         *,
         parser: NhtsaApiParser | None = None,
+        logger: CrawlLogger | None = None,
     ) -> None:
         self.repository = repository
         self.config = config
         self.parser = parser or NhtsaApiParser()
+        self.logger = logger
         self.writer = NhtsaRecordWriter(repository)
         self.request_count = 0
 
@@ -59,6 +67,7 @@ class NhtsaApiSyncService:
         publishable: list[tuple[str, str, int]] = []
         replace_datasets: list[str] = []
         active_artifact_id: int | None = None
+        self._event("nhtsa_api_run_started", run_key=run_key, scope=scope_name)
         try:
             async with NhtsaApiClient(self.config) as client:
                 if scope_name in {"all", "vpic"}:
@@ -162,6 +171,14 @@ class NhtsaApiSyncService:
                 new_versions=new_versions,
                 rejected_rows=rejected_rows,
             )
+            self._event(
+                "nhtsa_api_run_completed",
+                run_key=run_key,
+                api_requests=self.request_count,
+                source_rows=source_rows,
+                downloaded=downloaded,
+                reused=reused,
+            )
             return {
                 "run_id": run_id,
                 "run_key": run_key,
@@ -200,6 +217,14 @@ class NhtsaApiSyncService:
                 rejected_rows=rejected_rows,
                 error_message=f"{type(error).__name__}: {error}",
             )
+            self._event(
+                "nhtsa_api_run_failed",
+                run_key=run_key,
+                status="failed",
+                api_requests=self.request_count,
+                error_type=type(error).__name__,
+                error=str(error),
+            )
             return {
                 "run_id": run_id,
                 "run_key": run_key,
@@ -221,16 +246,49 @@ class NhtsaApiSyncService:
         client: NhtsaApiClient,
         source: ApiSource,
     ) -> ApiSourceImport:
-        self.request_count += 1
-        if self.request_count > API_REQUEST_BUDGET:
-            raise ValueError(f"NHTSA API request budget exceeded ({API_REQUEST_BUDGET})")
         current = self.repository.current_artifact(source.dataset_name, source.key)
-        download, body = await client.fetch(source, current_artifact=current)
+        source_attempt = 0
+        while True:
+            source_attempt += 1
+            self.request_count += 1
+            if self.request_count > API_REQUEST_BUDGET:
+                raise ValueError(f"NHTSA API request budget exceeded ({API_REQUEST_BUDGET})")
+            if source_attempt == 1:
+                self._event(
+                    "nhtsa_api_source_started",
+                    source_key=source.key,
+                    dataset=source.dataset_name,
+                    request_number=self.request_count,
+                )
+            try:
+                download, body = await client.fetch(source, current_artifact=current)
+                break
+            except NhtsaApiError as error:
+                if not error.retryable or source_attempt > NHTSA_API_MAX_TRANSIENT_RETRIES:
+                    raise
+                delay = nhtsa_transient_retry_delay(source_attempt, error.retry_after)
+                self._event(
+                    "nhtsa_api_retry_scheduled",
+                    source_key=source.key,
+                    dataset=source.dataset_name,
+                    request_number=self.request_count,
+                    source_attempt=source_attempt,
+                    status=error.status,
+                    delay_seconds=round(delay, 3),
+                    error_type=type(error).__name__,
+                )
+                await asyncio.sleep(delay)
         if download.reused_artifact_id is not None:
             if current is None:
                 raise ValueError("reused API response has no current artifact")
             body = await asyncio.to_thread(Path(str(current["stored_path"])).read_bytes)
             document = self.parser.parse(body, source)
+            self._event(
+                "nhtsa_api_source_reused",
+                source_key=source.key,
+                artifact_id=download.reused_artifact_id,
+                source_rows=document.count,
+            )
             return ApiSourceImport(download.reused_artifact_id, document, False, 0)
         if download.sha256 is None or download.path is None or body is None:
             raise ValueError(f"{source.key} API download has no content")
@@ -242,6 +300,12 @@ class NhtsaApiSyncService:
         )
         if existing and existing["status"] == "imported":
             document = self.parser.parse(body, source)
+            self._event(
+                "nhtsa_api_source_reused",
+                source_key=source.key,
+                artifact_id=int(str(existing["id"])),
+                source_rows=document.count,
+            )
             return ApiSourceImport(int(str(existing["id"])), document, False, 0)
         if existing and existing["status"] == "quarantined":
             raise ValueError(
@@ -291,7 +355,18 @@ class NhtsaApiSyncService:
             )
             if total_rejections:
                 raise ValueError(f"{source.key} rejected {total_rejections} API records")
+            self._event(
+                "nhtsa_api_source_completed",
+                source_key=source.key,
+                artifact_id=artifact_id,
+                source_rows=document.count,
+                new_versions=new_versions,
+            )
             return ApiSourceImport(artifact_id, document, True, new_versions)
         except Exception as error:
             self.repository.quarantine_artifact(artifact_id, str(error))
             raise
+
+    def _event(self, event: str, **fields: object) -> None:
+        if self.logger is not None:
+            self.logger.event(event, **fields)

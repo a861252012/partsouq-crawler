@@ -1,0 +1,16 @@
+[Unit]
+Description=Start NHTSA and PartSouq synchronization on day 1 at 01:00 Asia/Taipei
+
+[Timer]
+OnCalendar=*-*-01 01:00:00 Asia/Taipei
+# Recover after a host reboot or hard process failure without repeatedly hitting a source.
+# The monthly DB lease makes these 12-hour checks a no-op while a run is active or complete.
+OnCalendar=*-*-01 13:00:00 Asia/Taipei
+OnCalendar=*-*-02..03 01:00:00 Asia/Taipei
+OnCalendar=*-*-02..03 13:00:00 Asia/Taipei
+Persistent=true
+AccuracySec=1min
+Unit=partsouq-monthly-sync.service
+
+[Install]
+WantedBy=timers.target

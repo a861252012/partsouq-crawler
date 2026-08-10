@@ -43,14 +43,17 @@ def test_discovery_ignores_fragment_javascript_and_mailto() -> None:
 def test_partsouq_scope_allows_catalog_search_and_sitemap() -> None:
     seed = "https://partsouq.com/en/catalog/genuine"
     assert is_in_scope("https://partsouq.com/en/catalog/genuine/parts?ssd=x", seed)
+    assert is_in_scope("https://partsouq.com/catalog/genuine/vehicle?ssd=x", seed)
     assert is_in_scope("https://partsouq.com/en/search/all?q=1", seed)
-    assert is_in_scope("https://partsouq.com/catalog.xml.gz", seed)
+    assert is_in_scope("https://partsouq.com/toyota-catalogmap.xml", seed)
 
 
 def test_partsouq_scope_rejects_cart_assets_and_other_hosts() -> None:
     seed = "https://partsouq.com/en/catalog/genuine"
     assert not is_in_scope("https://partsouq.com/cart", seed)
     assert not is_in_scope("https://partsouq.com/app.js", seed)
+    assert not is_in_scope("https://partsouq.com/pagemap.xml", seed)
+    assert not is_in_scope("https://partsouq.com/productmap-0-50000.xml", seed)
     assert not is_in_scope("https://example.com/en/catalog/genuine", seed)
 
 

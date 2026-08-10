@@ -17,13 +17,12 @@ fi
 exec partsouq-crawler crawl-all \
     --run-id partsouq-genuine-full \
     --seed-url 'https://partsouq.com/en/catalog/genuine' \
-    --sqlite "${PARTSOUQ_DATABASE:-output/partsouq-live.sqlite3}" \
     --max-pages 0 \
     --max-depth 0 \
     --concurrency "${PARTSOUQ_CONCURRENCY:-1}" \
-    --delay "${PARTSOUQ_DELAY_SECONDS:-5}" \
+    --delay "${PARTSOUQ_DELAY_SECONDS:-30}" \
     --timeout "${PARTSOUQ_REQUEST_TIMEOUT_SECONDS:-30}" \
-    --retry-count "${PARTSOUQ_MAX_RETRIES:-3}" \
+    --retry-count "${PARTSOUQ_MAX_RETRIES:-1}" \
     --robots-policy require \
     --user-agent "$PARTSOUQ_USER_AGENT" \
     "${transport_args[@]}"

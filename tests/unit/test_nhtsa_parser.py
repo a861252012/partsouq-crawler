@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import zipfile
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from partsouq_crawler.nhtsa.datasets import (
     BULK_SOURCES,
@@ -11,6 +13,7 @@ from partsouq_crawler.nhtsa.datasets import (
     DATASET_SPECS,
     RECALL_FIELDS,
     BulkSource,
+    received_date_periods,
 )
 from partsouq_crawler.nhtsa.models import ParsedRecord, RejectedRow
 from partsouq_crawler.nhtsa.parser import BulkArtifactParser, normalize_header
@@ -166,15 +169,30 @@ def test_header_normalization_matches_nhtsa_communication_fields() -> None:
 
 
 def test_official_source_manifest_has_expected_non_overlapping_coverage() -> None:
+    period_count = len(received_date_periods(datetime.now(ZoneInfo("America/New_York")).year))
     assert Counter(source.dataset_name for source in BULK_SOURCES) == {
         "safety_ratings": 1,
         "recalls": 2,
         "investigations": 1,
-        "complaints": 7,
-        "manufacturer_communications_summary": 7,
-        "manufacturer_communications": 7,
+        "complaints": period_count,
+        "manufacturer_communications_summary": period_count,
+        "manufacturer_communications": period_count,
     }
     assert len({source.key for source in BULK_SOURCES}) == len(BULK_SOURCES)
     assert len({source.url for source in BULK_SOURCES}) == len(BULK_SOURCES)
     assert len(CSSI_SOURCES) == 56
     assert len({source.key for source in CSSI_SOURCES}) == len(CSSI_SOURCES)
+
+
+def test_received_date_periods_expand_without_overlapping() -> None:
+    assert received_date_periods(2025) == (
+        "1995-1999",
+        "2000-2004",
+        "2005-2009",
+        "2010-2014",
+        "2015-2019",
+        "2020-2024",
+        "2025-2025",
+    )
+    assert received_date_periods(2027)[-1] == "2025-2027"
+    assert received_date_periods(2030)[-2:] == ("2025-2029", "2030-2030")

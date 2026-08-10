@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import signal
+import uuid
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlsplit, urlunsplit
@@ -12,14 +13,15 @@ from partsouq_crawler.config import CrawlerConfig
 from partsouq_crawler.crawl.challenge import detect_challenge
 from partsouq_crawler.crawl.discovery import is_in_scope, normalize_url
 from partsouq_crawler.crawl.fetcher import FetchError
-from partsouq_crawler.crawl.retries import RETRYABLE_STATUS, retry_delay
+from partsouq_crawler.crawl.retries import RETRYABLE_STATUS, rate_limit_delay, retry_delay
 from partsouq_crawler.crawl.robots import RobotsRules, parse_robots
 from partsouq_crawler.crawl.sitemap import parse_sitemap
 from partsouq_crawler.crawl.transport import FetchTransport, create_fetch_transport
-from partsouq_crawler.db.repository import Repository
+from partsouq_crawler.db.repository import LeaseLostError, Repository
 from partsouq_crawler.logging import CrawlLogger
 from partsouq_crawler.models.crawl import FetchResult, QueueItem
 from partsouq_crawler.parsers.base import CatalogParser, ParseError
+from partsouq_crawler.services.archive_queue import redact_error, redact_sensitive_url
 from partsouq_crawler.services.ingest import IngestService
 
 
@@ -50,6 +52,7 @@ class CrawlerEngine:
         self._counter_lock = asyncio.Lock()
         self.robots: RobotsRules | None = None
         self.run_id = 0
+        self.worker_instance = uuid.uuid4().hex
 
     async def run(self) -> int:
         self.run_id = await self.repository.create_or_get_run(
@@ -57,6 +60,15 @@ class CrawlerEngine:
         )
         await self.repository.recover_expired_leases(self.run_id)
         await self.repository.set_run_status(self.run_id, "running")
+        self.logger.event(
+            "crawl_policy",
+            run_id=self.run_key,
+            concurrency=self.config.concurrency,
+            delay_seconds=self.config.delay_seconds,
+            max_retries=self.config.max_retries,
+            robots_policy=self.config.robots_policy,
+            transport=self.config.transport,
+        )
         self._install_signal_handlers()
         async with create_fetch_transport(self.config) as fetcher:
             user_agent = fetcher.user_agent
@@ -91,7 +103,7 @@ class CrawlerEngine:
                         )
 
             workers = [
-                asyncio.create_task(self._worker(fetcher, f"worker-{index + 1}"))
+                asyncio.create_task(self._worker(fetcher, f"{self.worker_instance}-{index + 1}"))
                 for index in range(self.config.concurrency)
             ]
             await asyncio.gather(*workers)
@@ -106,10 +118,12 @@ class CrawlerEngine:
         if saved is not None:
             row, body = saved
             if row["is_cloudflare_challenge"]:
-                raise CrawlBlocked(str(row["challenge_reason"] or "cloudflare_challenge"))
-            if int(row["http_status"]) != 200:
-                raise CrawlBlocked("robots_unavailable")
-            return parse_robots(robots_url, body, row["charset"] or "utf-8")
+                if not self.config.retry_challenges:
+                    raise CrawlBlocked(str(row["challenge_reason"] or "cloudflare_challenge"))
+            else:
+                if int(row["http_status"]) != 200:
+                    raise CrawlBlocked("robots_unavailable")
+                return parse_robots(robots_url, body, row["charset"] or "utf-8")
 
         try:
             result = await fetcher.fetch_once(robots_url)
@@ -148,27 +162,86 @@ class CrawlerEngine:
             if item is None:
                 await self._unreserve_page()
                 counts = await self.repository.queue_counts(self.run_id)
-                if not self.stop_event.is_set() and (
-                    counts["pending"] > 0 or counts["in_progress"] > 0
-                ):
+                if self.stop_event.is_set():
+                    return
+                if counts["in_progress"] > 0:
+                    await asyncio.sleep(0.01)
+                    continue
+                if counts["pending"] > 0:
+                    runnable = await self.repository.runnable_queue_count(
+                        self.run_id,
+                        max_depth=self.config.max_depth,
+                    )
+                    if runnable == 0:
+                        await self.repository.set_run_status(self.run_id, "paused")
+                        self.stop_event.set()
+                        return
                     await asyncio.sleep(0.01)
                     continue
                 return
             try:
-                await self._process_item(fetcher, item)
+                heartbeat = asyncio.create_task(self._lease_heartbeat(item))
+                try:
+                    await self._process_item(fetcher, item)
+                finally:
+                    heartbeat.cancel()
+                    with suppress(asyncio.CancelledError, LeaseLostError):
+                        await heartbeat
             except asyncio.CancelledError:
                 await self.repository.release_in_progress(self.run_id, worker_id)
                 raise
+            except LeaseLostError:
+                self.logger.event(
+                    "page_lease_lost",
+                    run_id=self.run_key,
+                    queue_id=item.id,
+                    url=redact_sensitive_url(item.requested_url),
+                    status="lease_lost",
+                    attempt=item.attempts,
+                )
             except Exception as error:
-                await self.repository.finish_queue(item.id, "failed", error=str(error))
+                try:
+                    await self._finish_item(item, "failed", error=str(error))
+                except LeaseLostError:
+                    continue
                 self.logger.event(
                     "page_failed",
                     run_id=self.run_key,
                     queue_id=item.id,
-                    url=item.requested_url,
+                    url=redact_sensitive_url(item.requested_url),
                     status="failed",
                     attempt=item.attempts,
                 )
+
+    async def _lease_heartbeat(self, item: QueueItem) -> None:
+        interval = max(1.0, self.config.lease_seconds / 3)
+        while True:
+            await asyncio.sleep(interval)
+            if item.worker_id is None:
+                return
+            await self.repository.renew_queue_lease(
+                item.id,
+                worker_id=item.worker_id,
+                fencing_token=item.fencing_token,
+                lease_seconds=self.config.lease_seconds,
+            )
+
+    async def _finish_item(
+        self,
+        item: QueueItem,
+        status: str,
+        *,
+        error: str | None = None,
+        next_attempt_at: str | None = None,
+    ) -> None:
+        await self.repository.finish_queue(
+            item.id,
+            status,
+            error=error,
+            next_attempt_at=next_attempt_at,
+            worker_id=item.worker_id,
+            fencing_token=item.fencing_token,
+        )
 
     async def _reserve_page(self) -> bool:
         async with self._counter_lock:
@@ -186,7 +259,7 @@ class CrawlerEngine:
         if self.robots and not self.robots.allows(
             self.config.user_agent or "*", item.requested_url
         ):
-            await self.repository.finish_queue(item.id, "skipped_robots", error="robots disallow")
+            await self._finish_item(item, "skipped_robots", error="robots disallow")
             return
 
         last_error: str | None = None
@@ -194,32 +267,58 @@ class CrawlerEngine:
             try:
                 result = await fetcher.fetch_once(item.requested_url, attempt=attempt)
             except FetchError as error:
-                last_error = str(error)
+                last_error = redact_error(error, item.requested_url)
                 if attempt <= self.config.max_retries:
-                    await asyncio.sleep(retry_delay(attempt))
+                    delay = retry_delay(attempt)
+                    self.logger.event(
+                        "request_retry_scheduled",
+                        run_id=self.run_key,
+                        queue_id=item.id,
+                        url=redact_sensitive_url(item.requested_url),
+                        status="transport_error",
+                        attempt=attempt,
+                        delay_seconds=round(delay, 3),
+                        error=last_error,
+                    )
+                    await asyncio.sleep(delay)
                     continue
-                await self.repository.finish_queue(item.id, "failed", error=last_error)
+                await self._finish_item(item, "failed", error=last_error)
+                self.logger.event(
+                    "request_retry_exhausted",
+                    run_id=self.run_key,
+                    queue_id=item.id,
+                    url=redact_sensitive_url(item.requested_url),
+                    status="failed",
+                    attempt=attempt,
+                    error=last_error,
+                )
                 return
 
             decision = detect_challenge(result.status, result.headers, result.body)
+            retry_after = next(
+                (value for key, value in result.headers.items() if key.casefold() == "retry-after"),
+                None,
+            )
             response_id, _ = await self.repository.store_response(
                 self.run_id,
                 item.id,
                 result,
                 challenged=decision.challenged,
                 challenge_reason=decision.reason,
+                worker_id=item.worker_id,
+                fencing_token=item.fencing_token,
             )
             self.logger.event(
                 "response_stored",
                 run_id=self.run_key,
                 queue_id=item.id,
-                url=item.requested_url,
+                url=redact_sensitive_url(item.requested_url),
                 status=result.status,
                 attempt=attempt,
                 elapsed_ms=result.elapsed_ms,
             )
             if decision.challenged:
-                await self.repository.finish_queue(item.id, "challenged", error=decision.reason)
+                await self._finish_item(item, "challenged", error=decision.reason)
                 await self.repository.set_run_status(
                     self.run_id,
                     "blocked",
@@ -228,31 +327,68 @@ class CrawlerEngine:
                 )
                 self.blocked_event.set()
                 self.stop_event.set()
+                self.logger.event(
+                    "challenge_circuit_breaker_open",
+                    run_id=self.run_key,
+                    queue_id=item.id,
+                    url=redact_sensitive_url(item.requested_url),
+                    status="blocked",
+                    attempt=attempt,
+                    reason=decision.reason,
+                )
                 return
             if result.status in RETRYABLE_STATUS:
                 last_error = f"HTTP {result.status}"
                 if attempt <= self.config.max_retries:
-                    await asyncio.sleep(retry_delay(attempt, result.headers.get("Retry-After")))
+                    delay = retry_delay(attempt, retry_after)
+                    self.logger.event(
+                        "request_retry_scheduled",
+                        run_id=self.run_key,
+                        queue_id=item.id,
+                        url=redact_sensitive_url(item.requested_url),
+                        status=result.status,
+                        attempt=attempt,
+                        delay_seconds=round(delay, 3),
+                    )
+                    await asyncio.sleep(delay)
                     continue
-                await self.repository.finish_queue(item.id, "failed", error=last_error)
+                await self._finish_item(item, "failed", error=last_error)
+                self.logger.event(
+                    "request_retry_exhausted",
+                    run_id=self.run_key,
+                    queue_id=item.id,
+                    url=redact_sensitive_url(item.requested_url),
+                    status=result.status,
+                    attempt=attempt,
+                )
                 return
             if result.status == 429:
-                delay = retry_delay(attempt, result.headers.get("Retry-After"))
+                delay = rate_limit_delay(attempt, retry_after)
                 next_attempt = (datetime.now(UTC) + timedelta(seconds=delay)).isoformat()
-                await self.repository.finish_queue(
-                    item.id,
+                await self._finish_item(
+                    item,
                     "pending",
                     error="HTTP 429",
                     next_attempt_at=next_attempt,
                 )
                 await self.repository.set_run_status(self.run_id, "paused")
                 self.stop_event.set()
+                self.logger.event(
+                    "source_rate_limited",
+                    run_id=self.run_key,
+                    queue_id=item.id,
+                    url=redact_sensitive_url(item.requested_url),
+                    status="paused",
+                    attempt=attempt,
+                    delay_seconds=round(delay, 3),
+                    retry_after_present=retry_after is not None,
+                )
                 return
             if result.status in {404, 410}:
-                await self.repository.finish_queue(item.id, "gone")
+                await self._finish_item(item, "gone")
                 return
             if result.status >= 400:
-                await self.repository.finish_queue(item.id, "failed", error=f"HTTP {result.status}")
+                await self._finish_item(item, "failed", error=f"HTTP {result.status}")
                 return
             await self._parse_and_discover(item, response_id, result)
             return
@@ -271,7 +407,7 @@ class CrawlerEngine:
                 sitemap = parse_sitemap(result.body, compressed=item.requested_url.endswith(".gz"))
             except (ValueError, OSError, XMLSyntaxError) as error:
                 await self.repository.add_parse_failure(response_id, "sitemap", "sitemap", error)
-                await self.repository.finish_queue(item.id, "parse_failed", error=str(error))
+                await self._finish_item(item, "parse_failed", error=str(error))
                 return
             for url in (*sitemap.nested_sitemaps, *sitemap.urls):
                 if is_in_scope(url, self.seed_url):
@@ -285,7 +421,7 @@ class CrawlerEngine:
                         discovery_method="sitemap",
                         source_response_id=response_id,
                     )
-            await self.repository.finish_queue(item.id, "done")
+            await self._finish_item(item, "done")
             return
 
         try:
@@ -310,9 +446,9 @@ class CrawlerEngine:
             await self.repository.add_parse_failure(
                 response_id, "catalog_parser", item.page_type_hint or "unknown", error
             )
-            await self.repository.finish_queue(item.id, "parse_failed", error=str(error))
+            await self._finish_item(item, "parse_failed", error=str(error))
             return
-        await self.repository.finish_queue(item.id, "done")
+        await self._finish_item(item, "done")
 
     async def _finalize(self) -> int:
         if self.blocked_event.is_set():

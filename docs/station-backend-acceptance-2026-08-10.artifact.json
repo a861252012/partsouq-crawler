@@ -1,0 +1,808 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "NHTSA／PartSouq 資料與站方後台驗收",
+    "description": "2026-08-10 MySQL 實際資料、站方後台需求、schema 與 E2E 驗收快照。",
+    "generatedAt": "2026-08-10T06:00:00Z",
+    "cards": [
+      {
+        "id": "nhtsa_current_rows",
+        "description": "目前由 current pointers 發布的 12 個 NHTSA 官方資料集來源列數。",
+        "dataset": "headline_metrics",
+        "sourceId": "nhtsa_mysql_snapshot",
+        "metrics": [
+          {
+            "label": "NHTSA current rows",
+            "field": "nhtsa_current_rows",
+            "format": "compact"
+          }
+        ]
+      },
+      {
+        "id": "partsouq_archive_captures",
+        "description": "Common Crawl 與 Wayback 歷史封存頁面；不等於現行網站全量。",
+        "dataset": "headline_metrics",
+        "sourceId": "partsouq_mysql_snapshot",
+        "metrics": [
+          {
+            "label": "PartSouq archive captures",
+            "field": "partsouq_archive_captures",
+            "format": "compact"
+          }
+        ]
+      },
+      {
+        "id": "historical_fitments",
+        "description": "歷史封存適用關係，全部 is_verified=0。",
+        "dataset": "headline_metrics",
+        "sourceId": "partsouq_mysql_snapshot",
+        "metrics": [
+          {
+            "label": "歷史 fitments",
+            "field": "historical_fitments",
+            "format": "compact"
+          },
+          {
+            "label": "已驗證",
+            "field": "verified_fitments",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "station_translation_gap",
+        "description": "PartSouq 英文名已投影；中文名與俗稱尚無正式資料。",
+        "dataset": "headline_metrics",
+        "sourceId": "station_mysql_snapshot",
+        "metrics": [
+          {
+            "label": "中文對照",
+            "field": "translated_terms",
+            "format": "number"
+          },
+          {
+            "label": "待對帳",
+            "field": "open_reconciliation_cases",
+            "format": "compact"
+          }
+        ]
+      }
+    ],
+    "charts": [
+      {
+        "id": "partsouq_entity_rows",
+        "title": "PartSouq normalized 資料列數",
+        "subtitle": "2026-08-10 MySQL 快照；資料以歷史封存為主，適用關係全部未驗證",
+        "type": "bar",
+        "dataset": "partsouq_entities",
+        "sourceId": "partsouq_mysql_snapshot",
+        "valueFormat": "compact",
+        "encodings": {
+          "x": {
+            "field": "entity",
+            "type": "nominal",
+            "label": "資料實體"
+          },
+          "y": {
+            "field": "row_count",
+            "type": "quantitative",
+            "label": "列數"
+          },
+          "tooltip": [
+            {
+              "field": "verified_rows",
+              "type": "quantitative",
+              "label": "已驗證列數",
+              "format": "compact"
+            },
+            {
+              "field": "data_mode",
+              "type": "text",
+              "label": "資料模式"
+            },
+            {
+              "field": "completion_claim",
+              "type": "text",
+              "label": "完成判定"
+            }
+          ]
+        }
+      }
+    ],
+    "tables": [
+      {
+        "id": "requirements_table",
+        "title": "截圖六項需求驗收矩陣",
+        "subtitle": "完成代表程式與資料皆齊；部分完成表示介面已具備但正式內容仍有缺口",
+        "dataset": "requirements_matrix",
+        "sourceId": "acceptance_matrix",
+        "defaultSort": {
+          "field": "order",
+          "direction": "asc"
+        },
+        "density": "spacious",
+        "columns": [
+          {
+            "field": "order",
+            "label": "#",
+            "format": "number"
+          },
+          {
+            "field": "requirement",
+            "label": "需求",
+            "type": "text"
+          },
+          {
+            "field": "status",
+            "label": "判定",
+            "type": "text"
+          },
+          {
+            "field": "actual",
+            "label": "目前實況",
+            "type": "text"
+          },
+          {
+            "field": "backend",
+            "label": "後台能力",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "nhtsa_dataset_table",
+        "title": "NHTSA current publication",
+        "subtitle": "12 個已發布資料集，合計 9,876,638 source rows；當前 rejected rows 為 0",
+        "dataset": "nhtsa_datasets",
+        "sourceId": "nhtsa_mysql_snapshot",
+        "defaultSort": {
+          "field": "source_rows",
+          "direction": "desc"
+        },
+        "density": "dense",
+        "columns": [
+          {
+            "field": "dataset",
+            "label": "資料集",
+            "type": "text"
+          },
+          {
+            "field": "source_rows",
+            "label": "current rows",
+            "format": "number"
+          },
+          {
+            "field": "rejected_rows",
+            "label": "rejected",
+            "format": "number"
+          },
+          {
+            "field": "artifacts",
+            "label": "artifacts",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "station_schema_table",
+        "title": "站方後台新增 schema",
+        "subtitle": "來源事實、人工覆寫、VIN 解碼與對帳分層保存",
+        "dataset": "station_schema",
+        "sourceId": "station_schema_source",
+        "defaultSort": {
+          "field": "table",
+          "direction": "asc"
+        },
+        "density": "spacious",
+        "columns": [
+          {
+            "field": "table",
+            "label": "Table",
+            "type": "text"
+          },
+          {
+            "field": "purpose",
+            "label": "用途",
+            "type": "text"
+          },
+          {
+            "field": "integrity",
+            "label": "排重／稽核",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "test_results_table",
+        "title": "完整自測與 E2E",
+        "subtitle": "2026-08-10 在可連本機 MySQL 與 loopback 的環境執行",
+        "dataset": "test_results",
+        "sourceId": "test_suite_source",
+        "defaultSort": {
+          "field": "order",
+          "direction": "asc"
+        },
+        "density": "spacious",
+        "columns": [
+          {
+            "field": "order",
+            "label": "#",
+            "format": "number"
+          },
+          {
+            "field": "gate",
+            "label": "Gate",
+            "type": "text"
+          },
+          {
+            "field": "result",
+            "label": "結果",
+            "type": "text"
+          },
+          {
+            "field": "evidence",
+            "label": "驗證內容",
+            "type": "text"
+          }
+        ]
+      }
+    ],
+    "sources": [
+      {
+        "id": "nhtsa_mysql_snapshot",
+        "label": "MySQL nhtsa current artifact snapshot"
+      },
+      {
+        "id": "partsouq_mysql_snapshot",
+        "label": "MySQL partsouq normalized/archive snapshot"
+      },
+      {
+        "id": "station_mysql_snapshot",
+        "label": "MySQL station term/VIN/reconciliation snapshot"
+      },
+      {
+        "id": "acceptance_matrix",
+        "label": "User requirements and MySQL acceptance matrix"
+      },
+      {
+        "id": "station_schema_source",
+        "label": "Station admin MySQL migration",
+        "path": "src/partsouq_crawler/db/mysql_migrations/006_station_admin.sql"
+      },
+      {
+        "id": "test_suite_source",
+        "label": "Crawler/admin integration test suite",
+        "path": "tests"
+      },
+      {
+        "id": "nhtsa_official_api",
+        "label": "NHTSA vPIC Vehicle API",
+        "href": "https://vpic.nhtsa.dot.gov/api/Home/Index"
+      },
+      {
+        "id": "cloudflare_official_docs",
+        "label": "Cloudflare supported browsers",
+        "href": "https://developers.cloudflare.com/cloudflare-challenges/reference/supported-browsers/"
+      }
+    ],
+    "blocks": [
+      {
+        "id": "title",
+        "type": "markdown",
+        "body": "# NHTSA／PartSouq 資料與站方後台驗收"
+      },
+      {
+        "id": "technical_summary",
+        "type": "markdown",
+        "body": "## 結論：NHTSA 固定範圍已完成；PartSouq 現行全量與站方內容尚未完成\n\n- **NHTSA：固定的 12 個官方資料集已發布 9,876,638 列，當前批次 rejected=0。** 這個完成判定不包含「全球所有 VIN」，因為 VIN decode 是對站方提供 VIN 的查詢服務。\n- **PartSouq：不能說全部爬回。** 現有 26,460 個 archive captures 與 165,438 筆 fitments 是歷史封存資料，fitments 全部未驗證；live run 還有 149 個已發現 URL 待處理。\n- **站方後台程式已完成並能實際登入使用；需求資料內容未全齊。** 51,520 筆英文零件名稱已投影，但中文名稱／俗稱是 0，production VIN mapping 也是 0，已建立 51,520 筆待對帳案件。"
+      },
+      {
+        "id": "headline_metric_strip",
+        "type": "metric-strip",
+        "cardIds": [
+          "nhtsa_current_rows",
+          "partsouq_archive_captures",
+          "historical_fitments",
+          "station_translation_gap"
+        ]
+      },
+      {
+        "id": "partsouq_finding",
+        "type": "markdown",
+        "body": "## PartSouq 有真資料，但圖表不是現行完整率\n\n下圖只比較 MySQL 裡各 normalized 實體的**現有列數**，不表示 PartSouq 網站覆蓋率。網站全量分母未知，且 live queue 尚未耗盡，因此不能計算或宣稱完成百分比。最高的 165,438 筆 fitment 全部來自 historical archive 且 `is_verified=0`；它們適合查歷史候選，不可直接當今天的權威適用關係。"
+      },
+      {
+        "id": "partsouq_chart_block",
+        "type": "chart",
+        "chartId": "partsouq_entity_rows"
+      },
+      {
+        "id": "requirements_finding",
+        "type": "markdown",
+        "body": "## 截圖六項需求只有「後台能力」齊全，正式資料仍有三個關鍵缺口\n\n中英與俗稱介面、VIN 解碼／連結、分類與對帳頻道都已可編輯並保留 audit；但中文對照尚無正式內容、production 尚未提供 VIN、PartSouq current/full 尚未完成。這三項會直接影響對外查詢正確性，所以整體只能判定為**部分完成**。"
+      },
+      {
+        "id": "requirements_table_block",
+        "type": "table",
+        "tableId": "requirements_table"
+      },
+      {
+        "id": "scope_definitions",
+        "type": "markdown",
+        "body": "## 完成定義與資料邊界\n\n**NHTSA current complete**：指定 scope 的 expected artifacts 全部成功、來源列數對帳、當前 rejected=0，才更新 current pointers。**PartSouq current/full complete**：live queue 耗盡、failed/challenged/robots skip/parse failure 全為 0，且 provenance/FK 完整。歷史封存永遠不能替代 live current。**VIN complete**：只針對站方送入 queue 的 VIN；NHTSA vPIC 官方 batch endpoint 每批最多 50 筆，官方也說明服務受自動流量控制。"
+      },
+      {
+        "id": "nhtsa_finding",
+        "type": "markdown",
+        "body": "## NHTSA 12 個固定官方資料集已完整發布\n\n最新 full-scope run `nhtsa-bulk-all-coverage-v4` 狀態為 completed，current pointers 對應 457 個 artifacts、9,876,638 source rows、0 rejected。資料庫歷史上仍保留 5 個 quarantined artifacts 與 9 筆 rejected rows，這些屬於先前失敗嘗試，沒有進入 current publication。"
+      },
+      {
+        "id": "nhtsa_table_block",
+        "type": "table",
+        "tableId": "nhtsa_dataset_table"
+      },
+      {
+        "id": "architecture",
+        "type": "markdown",
+        "body": "## 後台採不可變來源＋覆寫稽核，避免人工修正污染爬蟲證據\n\nCrawler/NHTSA source tables 對後台帳號只有 SELECT。人工新增、更新、停用、恢復全部寫入 `admin_override_heads` 與 append-only `admin_override_events`，保存 revision、操作者、原因與 before/after。VIN 先進 persistent queue，再由固定 NHTSA vPIC endpoint 解碼並保存 raw JSON/SHA-256；VIN 對 PartSouq vehicle 必須站方明確連結，不做模糊自動配對。月排程依序執行 NHTSA bulk、NHTSA API、station sync、PartSouq，四個 source 的狀態與 log 都落 MySQL。"
+      },
+      {
+        "id": "schema_table_block",
+        "type": "table",
+        "tableId": "station_schema_table"
+      },
+      {
+        "id": "methodology",
+        "type": "markdown",
+        "body": "## 驗收方法同時檢查程式、MySQL 與真實 HTTP 路徑\n\n驗收不是只跑 unit tests：完整 suite 在可使用 loopback/MySQL 的環境執行；另建立全新暫存 schema 跑 migrations；以官方公開測試 VIN 實際呼叫 vPIC 並核對 raw body SHA；最後由 Gunicorn 啟動後台，走登入、dashboard、51,520 筆零件對照列表與 VIN 表單。靜態 gate 同時要求 Ruff、format、strict mypy 與 diff whitespace 全綠。"
+      },
+      {
+        "id": "test_table_block",
+        "type": "table",
+        "tableId": "test_results_table"
+      },
+      {
+        "id": "limitations",
+        "type": "markdown",
+        "body": "## 限制與不確定性\n\n1. **PartSouq server 穩定性仍未證明。** 本機 headed Chrome + NoDriver 能自動取得 200；Linux Docker + Xvfb 仍是 403。Cloudflare 官方明確將 headless 與 Playwright/Selenium 等 automation 列為不支援或可能被阻擋，因此正式 Linux host 必須先做 preflight。\n2. **PartSouq live 不是全量。** 現行 run 是 paused，149 pending；歷史 archive 沒有 current 保證。\n3. **中文資料缺失。** 51,520 筆英文名已建對帳工作集，但中文名與俗稱不得由程式臆造。\n4. **VIN 輸入來源尚未指定。** 後台 queue 已具備，但 production 目前 0 VIN；需接訂單、CSV 或站內 API。\n5. **NHTSA 的完整是定義範圍內完整。** vPIC 支援輸入 VIN 解碼，不等於存在可列舉全球所有 VIN 的資料集。"
+      },
+      {
+        "id": "next_steps",
+        "type": "markdown",
+        "body": "## 建議下一步\n\n1. 先指定 production VIN 來源與匯入契約，讓月排程有實際 VIN 可解碼。\n2. 由站方先處理 51,520 筆中文對帳案件中的高頻料號；每次變更都有 audit。\n3. 在正式 Linux host 執行 PartSouq 一頁 preflight；只有 final HTTP 200 才啟用月排程。\n4. 讓現有 live run 從 149 pending 繼續；queue 未耗盡前保持 `current/full=false`。\n5. 針對歷史 fitments 做抽樣人工驗證，經站方確認後才可標示 verified。"
+      },
+      {
+        "id": "further_questions",
+        "type": "markdown",
+        "body": "## 尚待站方決定\n\n- 中文名稱與俗稱的權威來源是人工編輯、內部字典，或供應商檔案？\n- VIN 會從訂單 DB、CSV 上傳，還是內部 API 送入？\n- PartSouq historical fitment 對外顯示時，要標為「歷史候選」還是先完全隱藏？\n- 正式後台要放在哪個網域與既有登入／SSO 後方？"
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-08-10T06:00:00Z",
+    "status": "partial",
+    "datasets": {
+      "headline_metrics": [
+        {
+          "nhtsa_current_rows": 9876638,
+          "partsouq_archive_captures": 26460,
+          "historical_fitments": 165438,
+          "verified_fitments": 0,
+          "translated_terms": 0,
+          "open_reconciliation_cases": 51520
+        }
+      ],
+      "partsouq_entities": [
+        {
+          "entity": "車型",
+          "row_count": 21510,
+          "verified_rows": 0,
+          "data_mode": "archive 為主＋少量 live",
+          "completion_claim": "非現行全量"
+        },
+        {
+          "entity": "分類",
+          "row_count": 74624,
+          "verified_rows": 0,
+          "data_mode": "archive 為主＋少量 live",
+          "completion_claim": "非現行全量"
+        },
+        {
+          "entity": "分解圖",
+          "row_count": 2724,
+          "verified_rows": 0,
+          "data_mode": "historical archive 為主",
+          "completion_claim": "非現行全量"
+        },
+        {
+          "entity": "料號",
+          "row_count": 52102,
+          "verified_rows": 0,
+          "data_mode": "historical archive 為主",
+          "completion_claim": "非現行全量"
+        },
+        {
+          "entity": "出現紀錄",
+          "row_count": 159505,
+          "verified_rows": 0,
+          "data_mode": "historical archive",
+          "completion_claim": "非現行全量"
+        },
+        {
+          "entity": "適用關係",
+          "row_count": 165438,
+          "verified_rows": 0,
+          "data_mode": "historical archive",
+          "completion_claim": "全部未驗證"
+        }
+      ],
+      "requirements_matrix": [
+        {
+          "order": 1,
+          "requirement": "汽車中文零件與英文零件對照",
+          "status": "部分完成",
+          "actual": "英文名稱 51,520；正式中文名稱 0",
+          "backend": "可建立／編輯中文名，保留來源與 audit"
+        },
+        {
+          "order": 2,
+          "requirement": "中文零件與常用俗稱對照",
+          "status": "部分完成",
+          "actual": "中文俗稱 0；不得自動杜撰",
+          "backend": "JSON 多值俗稱欄位可編輯與搜尋"
+        },
+        {
+          "order": 3,
+          "requirement": "VIN 對品牌／型號／樣式／年份",
+          "status": "部分完成",
+          "actual": "production VIN mapping 0；官方實測 VIN E2E 通過",
+          "backend": "可新增 VIN；月排程自動批次解碼"
+        },
+        {
+          "order": 4,
+          "requirement": "料號／名稱／VIN／車型適用關係",
+          "status": "未完成資料",
+          "actual": "歷史 fitment 165,438，全未驗證；VIN fitment 0",
+          "backend": "需先明確連結 VIN 與 PartSouq vehicle 才投影"
+        },
+        {
+          "order": 5,
+          "requirement": "零件大／中／小分類",
+          "status": "部分完成",
+          "actual": "taxonomy 74,624，以歷史封存為主",
+          "backend": "任意深度分類可搜尋、編輯與停用"
+        },
+        {
+          "order": 6,
+          "requirement": "對帳頻道",
+          "status": "完成程式／待處理資料",
+          "actual": "51,520 個 open 翻譯案件",
+          "backend": "可指派、留言、改狀態、結案並保留 audit"
+        }
+      ],
+      "nhtsa_datasets": [
+        {
+          "dataset": "manufacturer_communications",
+          "source_rows": 5797781,
+          "rejected_rows": 0,
+          "artifacts": 7
+        },
+        {
+          "dataset": "complaints",
+          "source_rows": 2233015,
+          "rejected_rows": 0,
+          "artifacts": 7
+        },
+        {
+          "dataset": "manufacturer_communications_summary",
+          "source_rows": 1208330,
+          "rejected_rows": 0,
+          "artifacts": 7
+        },
+        {
+          "dataset": "recalls",
+          "source_rows": 325810,
+          "rejected_rows": 0,
+          "artifacts": 2
+        },
+        {
+          "dataset": "investigations",
+          "source_rows": 154249,
+          "rejected_rows": 0,
+          "artifacts": 1
+        },
+        {
+          "dataset": "vpic_variable_values",
+          "source_rows": 69689,
+          "rejected_rows": 0,
+          "artifacts": 144
+        },
+        {
+          "dataset": "vpic_models",
+          "source_rows": 31827,
+          "rejected_rows": 0,
+          "artifacts": 1
+        },
+        {
+          "dataset": "vpic_manufacturers",
+          "source_rows": 22881,
+          "rejected_rows": 0,
+          "artifacts": 229
+        },
+        {
+          "dataset": "safety_ratings",
+          "source_rows": 17313,
+          "rejected_rows": 0,
+          "artifacts": 1
+        },
+        {
+          "dataset": "vpic_makes",
+          "source_rows": 12321,
+          "rejected_rows": 0,
+          "artifacts": 1
+        },
+        {
+          "dataset": "cssi_stations",
+          "source_rows": 3278,
+          "rejected_rows": 0,
+          "artifacts": 56
+        },
+        {
+          "dataset": "vpic_variables",
+          "source_rows": 144,
+          "rejected_rows": 0,
+          "artifacts": 1
+        }
+      ],
+      "station_schema": [
+        {
+          "table": "admin_override_events",
+          "purpose": "人工異動 append-only 事件",
+          "integrity": "head+revision unique；before/after/actor/reason"
+        },
+        {
+          "table": "admin_override_heads",
+          "purpose": "每筆來源或人工資料目前有效覆寫",
+          "integrity": "entity+identity unique；optimistic revision"
+        },
+        {
+          "table": "part_term_mappings",
+          "purpose": "英文零件名、正體中文名、中文俗稱",
+          "integrity": "part+normalized English SHA-256 unique"
+        },
+        {
+          "table": "reconciliation_cases",
+          "purpose": "翻譯與 VIN 車型連結對帳待辦",
+          "integrity": "case SHA-256 unique；evidence JSON"
+        },
+        {
+          "table": "vin_decode_requests",
+          "purpose": "VIN 持久工作佇列",
+          "integrity": "VIN unique；attempt/lease/fencing"
+        },
+        {
+          "table": "vin_decode_responses",
+          "purpose": "NHTSA vPIC raw JSON 與 HTTP 證據",
+          "integrity": "batch key unique；body SHA-256"
+        },
+        {
+          "table": "vin_part_fitments",
+          "purpose": "VIN 明確連結車型後的候選適用料號",
+          "integrity": "VIN+part+vehicle+derivation SHA-256 unique"
+        },
+        {
+          "table": "vin_vehicle_mappings",
+          "purpose": "VIN 對品牌／型號／系列／年份",
+          "integrity": "VIN unique；FK 到 raw response/PartSouq vehicle"
+        }
+      ],
+      "test_results": [
+        {
+          "order": 1,
+          "gate": "完整 pytest",
+          "result": "131 passed in 19.24s",
+          "evidence": "unit、fake HTTP、MySQL、admin、monthly、station"
+        },
+        {
+          "order": 2,
+          "gate": "Fresh schema E2E",
+          "result": "pass",
+          "evidence": "全新 MySQL schema v6、8 張站方／audit tables、FK 0"
+        },
+        {
+          "order": 3,
+          "gate": "Station MySQL E2E",
+          "result": "pass",
+          "evidence": "VIN queue/raw/SHA、fitment provenance、重跑不變、解除連結清理"
+        },
+        {
+          "order": 4,
+          "gate": "官方 NHTSA VIN E2E",
+          "result": "HTTP 200 / decoded",
+          "evidence": "raw JSON 3,890 bytes；body SHA 一致；ErrorCode 0；11 個實際 response headers"
+        },
+        {
+          "order": 5,
+          "gate": "Gunicorn HTTP E2E",
+          "result": "pass",
+          "evidence": "登入 200、dashboard 2 SQL、對照列表 3 SQL、VIN form 200"
+        },
+        {
+          "order": 6,
+          "gate": "Code review 修正",
+          "result": "pass",
+          "evidence": "部署設定、登入 redirect/Unicode、provenance、舊投影、rate limit/headers"
+        },
+        {
+          "order": 7,
+          "gate": "Ruff lint/format",
+          "result": "pass",
+          "evidence": "All checks passed；120 files formatted"
+        },
+        {
+          "order": 8,
+          "gate": "strict mypy",
+          "result": "pass",
+          "evidence": "81 source files，0 issues"
+        },
+        {
+          "order": 9,
+          "gate": "Git diff whitespace",
+          "result": "pass",
+          "evidence": "git diff --check 無輸出"
+        }
+      ]
+    },
+    "accessIssues": [
+      {
+        "id": "partsouq_live_incomplete",
+        "scope": "PartSouq live/current",
+        "message": "PartSouq live/current 全量未完成：目前 run paused，149 個已發現 URL pending。"
+      },
+      {
+        "id": "translations_missing",
+        "scope": "Station translation data",
+        "message": "51,520 筆英文零件名稱尚無正式正體中文名稱或俗稱。"
+      },
+      {
+        "id": "production_vin_feed_missing",
+        "scope": "Production VIN feed",
+        "message": "production 尚未提供 VIN feed；目前 VIN vehicle/fitment 都是 0。"
+      }
+    ]
+  },
+  "sources": [
+    {
+      "id": "nhtsa_mysql_snapshot",
+      "query": {
+        "engine": "mysql8",
+        "sql": "SELECT c.dataset_name, SUM(a.source_rows) AS source_rows, SUM(a.rejected_rows) AS rejected_rows, COUNT(*) AS artifacts FROM nhtsa.nhtsa_current_artifacts AS c JOIN nhtsa.nhtsa_source_artifacts AS a ON a.id = c.artifact_id GROUP BY c.dataset_name ORDER BY c.dataset_name;",
+        "description": "Counts source rows and rejected rows for every currently published NHTSA artifact.",
+        "executed_at": "2026-08-10T05:45:00Z",
+        "language": "sql",
+        "tables_used": [
+          "nhtsa.nhtsa_current_artifacts",
+          "nhtsa.nhtsa_source_artifacts"
+        ],
+        "filters": [
+          "Only artifacts referenced by nhtsa_current_artifacts"
+        ],
+        "metric_definitions": [
+          "current source rows = SUM(nhtsa_source_artifacts.source_rows) for current pointers",
+          "current rejected rows = SUM(nhtsa_source_artifacts.rejected_rows) for current pointers"
+        ]
+      }
+    },
+    {
+      "id": "partsouq_mysql_snapshot",
+      "query": {
+        "engine": "mysql8",
+        "sql": "SELECT 'vehicle_configurations' AS entity, COUNT(*) AS row_count FROM partsouq.vehicle_configurations UNION ALL SELECT 'taxonomy_nodes', COUNT(*) FROM partsouq.taxonomy_nodes UNION ALL SELECT 'diagrams', COUNT(*) FROM partsouq.diagrams UNION ALL SELECT 'part_numbers', COUNT(*) FROM partsouq.part_numbers UNION ALL SELECT 'part_occurrences', COUNT(*) FROM partsouq.part_occurrences UNION ALL SELECT 'fitments', COUNT(*) FROM partsouq.fitments;",
+        "description": "Counts normalized PartSouq rows in the production MySQL snapshot.",
+        "executed_at": "2026-08-10T05:45:00Z",
+        "language": "sql",
+        "tables_used": [
+          "partsouq.vehicle_configurations",
+          "partsouq.taxonomy_nodes",
+          "partsouq.diagrams",
+          "partsouq.part_numbers",
+          "partsouq.part_occurrences",
+          "partsouq.fitments",
+          "partsouq.archive_captures",
+          "partsouq.crawl_runs",
+          "partsouq.crawl_queue"
+        ],
+        "filters": [
+          "No row filter; historical and limited live records are counted together",
+          "Verified fitments are counted separately with is_verified = 1"
+        ],
+        "metric_definitions": [
+          "archive captures = COUNT(*) from archive_captures",
+          "historical fitments = COUNT(*) from fitments; all current rows have is_verified = 0"
+        ]
+      }
+    },
+    {
+      "id": "station_mysql_snapshot",
+      "query": {
+        "engine": "mysql8",
+        "sql": "SELECT (SELECT COUNT(*) FROM partsouq.part_term_mappings) AS term_rows, (SELECT COUNT(*) FROM partsouq.part_term_mappings WHERE NULLIF(TRIM(name_zh_tw), '') IS NOT NULL) AS translated_terms, (SELECT COUNT(*) FROM partsouq.vin_vehicle_mappings) AS vin_mappings, (SELECT COUNT(*) FROM partsouq.vin_part_fitments) AS vin_fitments, (SELECT COUNT(*) FROM partsouq.reconciliation_cases WHERE status = 'open') AS open_cases;",
+        "description": "Counts station translation, VIN and reconciliation work items.",
+        "executed_at": "2026-08-10T05:45:00Z",
+        "language": "sql",
+        "tables_used": [
+          "partsouq.part_term_mappings",
+          "partsouq.vin_vehicle_mappings",
+          "partsouq.vin_part_fitments",
+          "partsouq.reconciliation_cases"
+        ],
+        "filters": [
+          "Translated terms require non-empty name_zh_tw",
+          "Open reconciliation cases require status = open"
+        ]
+      }
+    },
+    {
+      "id": "acceptance_matrix",
+      "query": {
+        "engine": "mysql8",
+        "sql": "SELECT (SELECT COUNT(*) FROM partsouq.part_term_mappings) AS english_terms, (SELECT COUNT(*) FROM partsouq.part_term_mappings WHERE NULLIF(TRIM(name_zh_tw), '') IS NOT NULL) AS translated_terms, (SELECT COUNT(*) FROM partsouq.vin_vehicle_mappings) AS vin_mappings, (SELECT COUNT(*) FROM partsouq.vin_part_fitments) AS vin_fitments, (SELECT COUNT(*) FROM partsouq.taxonomy_nodes) AS taxonomy_nodes, (SELECT COUNT(*) FROM partsouq.reconciliation_cases WHERE status = 'open') AS open_cases;",
+        "description": "Maps the user-provided six station-backend requirements to verified MySQL counts.",
+        "executed_at": "2026-08-10T05:45:00Z",
+        "language": "sql",
+        "tables_used": [
+          "partsouq.part_term_mappings",
+          "partsouq.vin_vehicle_mappings",
+          "partsouq.vin_part_fitments",
+          "partsouq.taxonomy_nodes",
+          "partsouq.reconciliation_cases"
+        ],
+        "metric_definitions": [
+          "Requirement wording comes from the user-provided 2026-08-10 station backend screenshot",
+          "Partially complete means the editing workflow exists but required production content is missing or unverified"
+        ]
+      }
+    },
+    {
+      "id": "station_schema_source",
+      "label": "Station admin migration 006",
+      "path": "src/partsouq_crawler/db/mysql_migrations/006_station_admin.sql"
+    },
+    {
+      "id": "test_suite_source",
+      "label": "Automated and HTTP E2E evidence",
+      "path": "tests",
+      "query": {
+        "engine": "mysql8",
+        "sql": "SELECT 1 AS `order`, '完整 pytest' AS gate, '131 passed in 19.24s' AS result, 'unit, fake HTTP, MySQL, admin, monthly, station' AS evidence UNION ALL SELECT 2, 'Fresh schema E2E', 'pass', 'schema v6, station/audit tables, FK 0' UNION ALL SELECT 3, 'Station MySQL E2E', 'pass', 'VIN queue/raw/SHA, fitment provenance, idempotence, unlink cleanup' UNION ALL SELECT 4, 'NHTSA VIN E2E', 'HTTP 200 / decoded', 'raw body SHA matches; 11 actual headers' UNION ALL SELECT 5, 'Gunicorn HTTP E2E', 'pass', 'login, dashboard, term list, VIN form' UNION ALL SELECT 6, 'Code review', 'pass', 'deployment auth, redirect, provenance, stale projection, rate limit' UNION ALL SELECT 7, 'Ruff', 'pass', 'lint and format' UNION ALL SELECT 8, 'strict mypy', 'pass', '81 source files' UNION ALL SELECT 9, 'git diff --check', 'pass', 'no whitespace errors';",
+        "description": "Materializes the reviewed acceptance-gate results shown in this report.",
+        "executed_at": "2026-08-10T05:59:00Z",
+        "language": "sql",
+        "tables_used": [],
+        "metric_definitions": [
+          "Test results are exact command outputs captured during the 2026-08-10 acceptance run"
+        ]
+      }
+    },
+    {
+      "id": "nhtsa_official_api",
+      "label": "NHTSA vPIC Vehicle API",
+      "href": "https://vpic.nhtsa.dot.gov/api/Home/Index"
+    },
+    {
+      "id": "cloudflare_official_docs",
+      "label": "Cloudflare supported browsers",
+      "href": "https://developers.cloudflare.com/cloudflare-challenges/reference/supported-browsers/"
+    }
+  ],
+  "package_info": {
+    "originUrl": "artifact://station-backend-acceptance-2026-08-10",
+    "controls": {
+      "edit": false,
+      "refresh": false
+    }
+  }
+}

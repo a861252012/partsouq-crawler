@@ -45,6 +45,7 @@ def _warc_response() -> bytes:
         http_headers=http_headers,
     )
     writer.write_record(record)
+    record.raw_stream.close()
     return output.getvalue()
 
 

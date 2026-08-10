@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
+import os
 import re
 import ssl
 from pathlib import Path
 from typing import TypedDict, cast
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import urlsplit
+from uuid import uuid4
 
 import aiohttp
 import certifi
@@ -15,20 +18,40 @@ from warcio.archiveiterator import ArchiveIterator
 
 from partsouq_crawler.db.repository import Repository
 from partsouq_crawler.services.archive_import import ArchiveCaptureInput, ArchiveImportService
+from partsouq_crawler.services.archive_queue import (
+    ArchiveImportClaim,
+    ArchiveImportItemInput,
+    ArchiveQueueRepository,
+    redact_error,
+    redact_sensitive_url,
+)
 
 COLLECTION_PATTERN = re.compile(r"crawl-data/(CC-MAIN-\d{4}-\d{2})/")
-VIN_PATTERN = re.compile(r"^[A-HJ-NPR-Z0-9]{17}$", re.IGNORECASE)
-ALLOWED_PATH = "/en/catalog/genuine/diagram"
+ALLOWED_HOSTS = frozenset({"partsouq.com", "www.partsouq.com"})
+ALLOWED_PATHS = frozenset(
+    {
+        "/en/catalog/genuine",
+        "/en/catalog/genuine/search",
+        "/en/catalog/genuine/vehicle",
+        "/en/catalog/genuine/groups",
+        "/en/catalog/genuine/unit",
+        "/en/catalog/genuine/diagram",
+        "/en/catalog/genuine/pick",
+        "/en/catalog/genuine/parts",
+        "/en/catalog/genuine/locate",
+        "/en/search/all",
+    }
+)
 
 
 class CommonCrawlIndexRecord(TypedDict):
-    url: str
-    filename: str
-    offset: int
-    length: int
-    collection: str
-    timestamp: str
-    digest: str
+    source_url: str
+    warc_filename: str
+    warc_offset: int
+    warc_length: int
+    collection_name: str
+    index_timestamp: str
+    index_digest: str
 
 
 class ExtractedWarcResponse(TypedDict):
@@ -62,7 +85,7 @@ class CommonCrawlImportService:
             {
                 "source_mode": "historical_archive",
                 "archive_source": "common_crawl",
-                "allowed_path": ALLOWED_PATH,
+                "allowed_paths": sorted(ALLOWED_PATHS),
                 "current_or_complete": False,
             },
         )
@@ -71,12 +94,42 @@ class CommonCrawlImportService:
         if max_records:
             records = records[:max_records]
 
+        queue_repository = cast(ArchiveQueueRepository, self.repository)
+        manifest_key = hashlib.sha256(f"common_crawl\0{run_key}".encode()).hexdigest()
+        manifest_id = await queue_repository.create_or_get_archive_import_manifest(
+            run_id=run_id,
+            archive_source="common_crawl",
+            manifest_key=manifest_key,
+            metadata={
+                "index_file_count": len(index_paths),
+                "selected_record_count": len(records),
+                "source_snapshots": [
+                    {
+                        "path": str(path),
+                        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                        "bytes": path.stat().st_size,
+                    }
+                    for path in index_paths
+                ],
+            },
+        )
+        item_inputs = [self._queue_item(record) for record in records]
+        items_enqueued = await queue_repository.enqueue_archive_import_items(
+            manifest_id,
+            item_inputs,
+        )
+        resumed = await queue_repository.prepare_archive_import_resume(manifest_id)
+        initial_counts = dict(await queue_repository.archive_import_item_counts(manifest_id))
+
         imported = 0
-        skipped_existing = 0
         failed = 0
+        challenged = 0
         parts_parsed = 0
         records_inserted = 0
+        skipped_existing_captures = 0
         failures: list[dict[str, object]] = []
+        worker_id = f"common-crawl-{os.getpid()}-{uuid4().hex[:12]}"
+        lease_seconds = max(60, int(timeout_seconds * 2))
         timeout = aiohttp.ClientTimeout(total=timeout_seconds)
         ssl_context = ssl.create_default_context(cafile=certifi.where())
         async with aiohttp.ClientSession(
@@ -85,56 +138,122 @@ class CommonCrawlImportService:
             connector=aiohttp.TCPConnector(ssl=ssl_context),
             headers={"User-Agent": "partsouq-crawler/0.1 archive-import"},
         ) as session:
-            for position, record in enumerate(records, start=1):
-                if await self.repository.archive_capture_exists(
-                    archive_source="common_crawl",
-                    collection_name=record["collection"],
-                    warc_filename=record["filename"],
-                    warc_offset=record["offset"],
-                    warc_length=record["length"],
-                ):
-                    skipped_existing += 1
+            position = 0
+            while True:
+                claimed_row = await queue_repository.claim_archive_import_item(
+                    manifest_id,
+                    worker_id=worker_id,
+                    lease_seconds=lease_seconds,
+                )
+                if claimed_row is None:
+                    break
+                position += 1
+                claim = ArchiveImportClaim.from_row(claimed_row)
+                existing_response_id = await self.repository.response_id_for_archive_capture(
+                    claim.capture_key
+                )
+                if existing_response_id is not None:
+                    skipped_existing_captures += 1
+                    await queue_repository.finish_archive_import_item(
+                        claim.id,
+                        "done",
+                        fencing_token=claim.fencing_token,
+                        response_id=existing_response_id,
+                    )
                     continue
-                if imported or failed:
+                if position > 1:
                     await asyncio.sleep(delay_seconds)
                 try:
-                    warc_bytes = await self._download_record(session, record)
+                    warc_bytes = await self._download_record(session, claim)
                     extracted = await asyncio.to_thread(self._extract_response, warc_bytes)
+                    if not self._is_allowed_url(extracted["source_url"]):
+                        raise ValueError("WARC target URL is outside the PartSouq allowlist")
                     report = await self.archive_import.import_bytes(
                         run_key=run_key,
                         capture=ArchiveCaptureInput(
                             source_url=extracted["source_url"],
                             archive_source="common_crawl",
                             captured_at=extracted["captured_at"],
+                            run_id=run_id,
                             http_status=extracted["http_status"],
                             response_headers=extracted["headers"],
-                            collection_name=record["collection"],
-                            warc_filename=record["filename"],
-                            warc_offset=record["offset"],
-                            warc_length=record["length"],
-                            archive_digest=extracted["payload_digest"] or record["digest"],
+                            collection_name=claim.collection_name,
+                            warc_filename=claim.warc_filename,
+                            warc_offset=claim.warc_offset,
+                            warc_length=claim.warc_length,
+                            archive_digest=(extracted["payload_digest"] or claim.index_digest),
                             truncation_reason=extracted["truncation_reason"],
                             metadata={
+                                "capture_key": claim.capture_key,
                                 "warc_record_id": extracted["record_id"],
-                                "index_timestamp": record["timestamp"],
+                                "index_timestamp": claim.index_timestamp,
+                                "archive_import_manifest_id": manifest_id,
+                                "archive_import_item_id": claim.id,
                             },
                         ),
                         body=extracted["body"],
                     )
-                    imported += 1
-                    parts_parsed += cast(int, report["parts_parsed"])
-                    records_inserted += cast(int, report["records_inserted"])
+                    response_id = cast(int, report["response_id"])
+                    if report["cloudflare_challenge"]:
+                        challenged += 1
+                        await queue_repository.finish_archive_import_item(
+                            claim.id,
+                            "challenged",
+                            fencing_token=claim.fencing_token,
+                            response_id=response_id,
+                            error=str(report["error"] or "cloudflare_challenge"),
+                        )
+                    elif report["error"] is not None:
+                        failed += 1
+                        error = redact_error(report["error"], claim.source_url)
+                        await queue_repository.finish_archive_import_item(
+                            claim.id,
+                            "parse_failed",
+                            fencing_token=claim.fencing_token,
+                            response_id=response_id,
+                            error=error,
+                        )
+                        if len(failures) < 20:
+                            failures.append(
+                                {
+                                    "position": position,
+                                    "item_id": claim.id,
+                                    "source_url": redact_sensitive_url(claim.source_url),
+                                    "error_type": "ParseError",
+                                    "error": error,
+                                }
+                            )
+                    else:
+                        imported += 1
+                        parts_parsed += cast(int, report["parts_parsed"])
+                        records_inserted += cast(int, report["records_inserted"])
+                        await queue_repository.finish_archive_import_item(
+                            claim.id,
+                            "done",
+                            fencing_token=claim.fencing_token,
+                            response_id=response_id,
+                        )
                 except (aiohttp.ClientError, OSError, RuntimeError, ValueError) as error:
                     failed += 1
+                    redacted_error = redact_error(error, claim.source_url)
+                    await queue_repository.finish_archive_import_item(
+                        claim.id,
+                        "failed",
+                        fencing_token=claim.fencing_token,
+                        error=redacted_error,
+                    )
                     if len(failures) < 20:
                         failures.append(
                             {
                                 "position": position,
+                                "item_id": claim.id,
+                                "source_url": redact_sensitive_url(claim.source_url),
                                 "error_type": type(error).__name__,
-                                "error": str(error),
+                                "error": redacted_error,
                             }
                         )
 
+        final_counts = dict(await queue_repository.archive_import_item_counts(manifest_id))
         await self.repository.set_run_status(
             run_id,
             "completed_with_gaps",
@@ -146,13 +265,22 @@ class CommonCrawlImportService:
             "run_key": run_key,
             "source_mode": "historical_archive",
             "archive_source": "common_crawl",
+            "archive_import_manifest_id": manifest_id,
             "index_records_selected": len(records),
+            "items_enqueued": items_enqueued,
+            "items_resumed": resumed,
             "imported": imported,
-            "skipped_existing": skipped_existing,
+            "skipped_existing": initial_counts.get("done", 0) + skipped_existing_captures,
+            "skipped_terminal": initial_counts.get("done", 0)
+            + initial_counts.get("challenged", 0)
+            + initial_counts.get("http_error", 0)
+            + initial_counts.get("parse_failed", 0),
             "failed": failed,
+            "challenged": challenged,
             "parts_parsed": parts_parsed,
             "records_inserted": records_inserted,
             "failures": failures,
+            "item_counts": final_counts,
             "current_or_complete": False,
         }
 
@@ -161,52 +289,77 @@ class CommonCrawlImportService:
         records: list[CommonCrawlIndexRecord] = []
         seen_locations: set[tuple[str, int, int]] = set()
         for path in index_paths:
-            for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-                try:
-                    raw = json.loads(line)
-                    url = str(raw["url"])
-                    filename = str(raw["filename"])
-                    offset = int(raw["offset"])
-                    length = int(raw["length"])
-                except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-                    raise ValueError(
-                        f"invalid index record {path}:{line_number}: {error}"
-                    ) from error
-                parsed = urlsplit(url)
-                if parsed.hostname != "partsouq.com" or parsed.path != ALLOWED_PATH:
-                    continue
-                if any(
-                    VIN_PATTERN.fullmatch(value) for value in parse_qs(parsed.query).get("q", [])
-                ):
-                    continue
-                match = COLLECTION_PATTERN.search(filename)
-                if match is None:
-                    raise ValueError(f"collection missing in {path}:{line_number}")
-                location = (filename, offset, length)
-                if location in seen_locations:
-                    continue
-                seen_locations.add(location)
-                records.append(
-                    {
-                        "url": url,
-                        "filename": filename,
-                        "offset": offset,
-                        "length": length,
-                        "collection": match.group(1),
-                        "timestamp": str(raw.get("timestamp") or ""),
-                        "digest": str(raw.get("digest") or ""),
-                    }
-                )
+            with path.open(encoding="utf-8") as index_file:
+                lines = enumerate(index_file, 1)
+                for line_number, line in lines:
+                    try:
+                        raw = json.loads(line)
+                        url = str(raw["url"])
+                        filename = str(raw["filename"])
+                        offset = int(raw["offset"])
+                        length = int(raw["length"])
+                    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+                        raise ValueError(
+                            f"invalid index record {path}:{line_number}: {error}"
+                        ) from error
+                    if not CommonCrawlImportService._is_allowed_url(url):
+                        continue
+                    match = COLLECTION_PATTERN.search(filename)
+                    if match is None:
+                        raise ValueError(f"collection missing in {path}:{line_number}")
+                    location = (filename, offset, length)
+                    if location in seen_locations:
+                        continue
+                    seen_locations.add(location)
+                    records.append(
+                        {
+                            "source_url": url,
+                            "warc_filename": filename,
+                            "warc_offset": offset,
+                            "warc_length": length,
+                            "collection_name": match.group(1),
+                            "index_timestamp": str(raw.get("timestamp") or ""),
+                            "index_digest": str(raw.get("digest") or ""),
+                        }
+                    )
         return records
+
+    @staticmethod
+    def _is_allowed_url(url: str) -> bool:
+        parsed = urlsplit(url)
+        path = parsed.path.rstrip("/") or "/"
+        return (
+            parsed.scheme in {"http", "https"}
+            and parsed.hostname in ALLOWED_HOSTS
+            and path in ALLOWED_PATHS
+        )
+
+    @staticmethod
+    def _queue_item(record: CommonCrawlIndexRecord) -> ArchiveImportItemInput:
+        location = json.dumps(
+            {
+                "archive_source": "common_crawl",
+                "collection_name": record["collection_name"],
+                "warc_filename": record["warc_filename"],
+                "warc_offset": record["warc_offset"],
+                "warc_length": record["warc_length"],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return {
+            "capture_key": hashlib.sha256(location.encode()).hexdigest(),
+            **record,
+        }
 
     @staticmethod
     async def _download_record(
         session: aiohttp.ClientSession,
-        record: CommonCrawlIndexRecord,
+        record: ArchiveImportClaim,
     ) -> bytes:
-        offset = int(record["offset"])
-        length = int(record["length"])
-        url = f"https://data.commoncrawl.org/{record['filename']}"
+        offset = record.warc_offset
+        length = record.warc_length
+        url = f"https://data.commoncrawl.org/{record.warc_filename}"
         headers = {"Range": f"bytes={offset}-{offset + length - 1}"}
         async with session.get(url, headers=headers) as response:
             body = await response.read()

@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import csv
+import json
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 from partsouq_crawler.db.repository import Repository
-from partsouq_crawler.exporters import write_csv, write_jsonl
+from partsouq_crawler.exporters.csv_exporter import spreadsheet_safe
+from partsouq_crawler.parsers.base import PARSER_VERSION
+from partsouq_crawler.services.archive_queue import redact_sensitive_url
+
+EXPORT_BATCH_SIZE = 1_000
 
 EXPORT_COLUMNS = (
     "Brand",
@@ -53,11 +60,31 @@ class ExportService:
         *,
         include_compatibility_hints: bool = False,
         include_unverified_fitments: bool = False,
+        include_sensitive_source_urls: bool = False,
     ) -> list[dict[str, Any]]:
-        verified_clause = "" if include_unverified_fitments else "WHERE f.is_verified = 1"
-        cursor = await self.repository.connection.execute(
-            f"""
+        rows: list[dict[str, Any]] = []
+        async for batch in self._batches(
+            include_compatibility_hints=include_compatibility_hints,
+            include_unverified_fitments=include_unverified_fitments,
+            include_sensitive_source_urls=include_sensitive_source_urls,
+        ):
+            rows.extend(batch)
+        return rows
+
+    async def _batches(
+        self,
+        *,
+        include_compatibility_hints: bool,
+        include_unverified_fitments: bool,
+        include_sensitive_source_urls: bool,
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        fitment_id = 0
+        while True:
+            cursor = await self.repository.connection.execute(
+                """
             SELECT
+                f.id AS fitment_id,
+                rs.id AS source_record_id,
                 v.catalog_brand AS brand,
                 v.name_raw AS vehicle_name,
                 v.model_raw AS model,
@@ -96,17 +123,88 @@ class ExportService:
             JOIN vehicle_configurations v ON v.id = f.vehicle_configuration_id
             JOIN diagrams d ON d.id = f.diagram_id
             LEFT JOIN taxonomy_nodes tn ON tn.id = d.taxonomy_node_id
-            JOIN record_sources rs ON rs.record_type = 'fitment' AND rs.record_id = f.id
+            JOIN record_sources rs ON rs.id = (
+                SELECT candidate.id
+                FROM record_sources candidate
+                WHERE candidate.record_type = 'fitment'
+                  AND candidate.record_id = f.id
+                ORDER BY
+                    (candidate.parser_name = 'catalog_parser'
+                     AND candidate.parser_version = ?) DESC,
+                    candidate.id DESC
+                LIMIT 1
+            )
             JOIN http_responses hr ON hr.id = rs.response_id
             LEFT JOIN archive_captures ac ON ac.response_id = hr.id
-            {verified_clause}
-            ORDER BY pn.number_normalized, v.id, d.id, po.id
-            """  # noqa: S608 - clause is selected from a fixed boolean option.
-        )
-        rows = [self._fitment_row(dict(row)) for row in await cursor.fetchall()]
+            WHERE f.id > ?
+              AND (? = 1 OR f.is_verified = 1)
+            ORDER BY f.id
+            LIMIT ?
+            """,
+                (
+                    PARSER_VERSION,
+                    fitment_id,
+                    int(include_unverified_fitments),
+                    EXPORT_BATCH_SIZE,
+                ),
+            )
+            raw_rows = [dict(row) for row in await cursor.fetchall()]
+            if not raw_rows:
+                break
+            yield [
+                self._fitment_row(
+                    row,
+                    include_sensitive_source_urls=include_sensitive_source_urls,
+                )
+                for row in raw_rows
+            ]
+            last = raw_rows[-1]
+            fitment_id = int(last["fitment_id"])
+
         if include_compatibility_hints:
-            rows.extend(await self._hint_rows())
-        return rows
+            hint_id = 0
+            while True:
+                cursor = await self.repository.connection.execute(
+                    """
+                    SELECT h.id AS hint_id, rs.id AS source_record_id,
+                           h.brand_text, h.model_text, h.compatibility_text, h.source_url,
+                           pn.name_en_raw, pn.number_raw, rs.response_id, hr.body_sha256
+                    FROM compatibility_hints h
+                    JOIN part_numbers pn ON pn.id = h.part_number_id
+                    JOIN record_sources rs ON rs.id = (
+                        SELECT candidate.id
+                        FROM record_sources candidate
+                        WHERE candidate.record_type = 'compatibility_hint'
+                          AND candidate.record_id = h.id
+                        ORDER BY
+                            (candidate.parser_name = 'catalog_parser'
+                             AND candidate.parser_version = ?) DESC,
+                            candidate.id DESC
+                        LIMIT 1
+                    )
+                    JOIN http_responses hr ON hr.id = rs.response_id
+                    WHERE h.id > ?
+                    ORDER BY h.id
+                    LIMIT ?
+                    """,
+                    (
+                        PARSER_VERSION,
+                        hint_id,
+                        EXPORT_BATCH_SIZE,
+                    ),
+                )
+                raw_rows = [dict(row) for row in await cursor.fetchall()]
+                if not raw_rows:
+                    break
+                yield [
+                    self._hint_row(
+                        row,
+                        include_sensitive_source_urls=include_sensitive_source_urls,
+                    )
+                    for row in raw_rows
+                ]
+                last = raw_rows[-1]
+                hint_id = int(last["hint_id"])
 
     async def export(
         self,
@@ -114,19 +212,41 @@ class ExportService:
         *,
         include_compatibility_hints: bool = False,
         include_unverified_fitments: bool = False,
+        include_sensitive_source_urls: bool = False,
     ) -> int:
-        rows = await self.rows(
-            include_compatibility_hints=include_compatibility_hints,
-            include_unverified_fitments=include_unverified_fitments,
-        )
-        if path.suffix.lower() == ".jsonl":
-            return write_jsonl(path, rows)
-        if path.suffix.lower() == ".csv":
-            return write_csv(path, rows)
-        raise ValueError("export output must end in .csv or .jsonl")
+        suffix = path.suffix.lower()
+        if suffix not in {".csv", ".jsonl"}:
+            raise ValueError("export output must end in .csv or .jsonl")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        count = 0
+        csv_writer: csv.DictWriter[str] | None = None
+        encoding = "utf-8-sig" if suffix == ".csv" else "utf-8"
+        with path.open("w", encoding=encoding, newline="" if suffix == ".csv" else None) as handle:
+            async for batch in self._batches(
+                include_compatibility_hints=include_compatibility_hints,
+                include_unverified_fitments=include_unverified_fitments,
+                include_sensitive_source_urls=include_sensitive_source_urls,
+            ):
+                if suffix == ".jsonl":
+                    for row in batch:
+                        handle.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+                else:
+                    if csv_writer is None:
+                        csv_writer = csv.DictWriter(handle, fieldnames=list(EXPORT_COLUMNS))
+                        csv_writer.writeheader()
+                    for row in batch:
+                        csv_writer.writerow(
+                            {key: spreadsheet_safe(value) for key, value in row.items()}
+                        )
+                count += len(batch)
+        return count
 
     @staticmethod
-    def _fitment_row(row: dict[str, Any]) -> dict[str, Any]:
+    def _fitment_row(
+        row: dict[str, Any],
+        *,
+        include_sensitive_source_urls: bool,
+    ) -> dict[str, Any]:
         category_path = row["category_path"] or ""
         categories = category_path.split(" > ") if category_path else []
         values = (
@@ -154,7 +274,11 @@ class ExportService:
             row["callout_raw"],
             row["quantity_raw"],
             row["note_raw"],
-            row["source_url"],
+            (
+                row["source_url"]
+                if include_sensitive_source_urls
+                else redact_sensitive_url(str(row["source_url"]))
+            ),
             row["source_mode"],
             row["archive_source"],
             row["captured_at"],
@@ -167,37 +291,31 @@ class ExportService:
         )
         return dict(zip(EXPORT_COLUMNS, values, strict=True))
 
-    async def _hint_rows(self) -> list[dict[str, Any]]:
-        cursor = await self.repository.connection.execute(
-            """
-            SELECT h.brand_text, h.model_text, h.compatibility_text, h.source_url,
-                   pn.name_en_raw, pn.number_raw, rs.response_id, hr.body_sha256
-            FROM compatibility_hints h
-            JOIN part_numbers pn ON pn.id = h.part_number_id
-            JOIN record_sources rs
-              ON rs.record_type = 'compatibility_hint' AND rs.record_id = h.id
-            JOIN http_responses hr ON hr.id = rs.response_id
-            ORDER BY pn.number_normalized, h.id
-            """
+    @staticmethod
+    def _hint_row(
+        row: dict[str, Any],
+        *,
+        include_sensitive_source_urls: bool,
+    ) -> dict[str, Any]:
+        item: dict[str, Any] = {column: None for column in EXPORT_COLUMNS}
+        item.update(
+            {
+                "Brand": row["brand_text"],
+                "Name": row["model_text"],
+                "產品英文名稱": row["name_en_raw"],
+                "Number": row["number_raw"],
+                "Note": row["compatibility_text"],
+                "Source URL": (
+                    row["source_url"]
+                    if include_sensitive_source_urls
+                    else redact_sensitive_url(str(row["source_url"]))
+                ),
+                "Source mode": "live_http",
+                "Response ID": row["response_id"],
+                "Response SHA-256": row["body_sha256"],
+                "Confidence": 0.4,
+                "Derivation": "search_compatibility_hint",
+                "Verified fitment": False,
+            }
         )
-        output: list[dict[str, Any]] = []
-        for row in await cursor.fetchall():
-            item: dict[str, Any] = {column: None for column in EXPORT_COLUMNS}
-            item.update(
-                {
-                    "Brand": row["brand_text"],
-                    "Name": row["model_text"],
-                    "產品英文名稱": row["name_en_raw"],
-                    "Number": row["number_raw"],
-                    "Note": row["compatibility_text"],
-                    "Source URL": row["source_url"],
-                    "Source mode": "live_http",
-                    "Response ID": row["response_id"],
-                    "Response SHA-256": row["body_sha256"],
-                    "Confidence": 0.4,
-                    "Derivation": "search_compatibility_hint",
-                    "Verified fitment": False,
-                }
-            )
-            output.append(item)
-        return output
+        return item

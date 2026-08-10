@@ -1,0 +1,35 @@
+[Unit]
+Description=Monthly NHTSA and PartSouq data synchronization
+After=network-online.target mysql.service
+Wants=network-online.target
+StartLimitIntervalSec=3d
+StartLimitBurst=4
+
+[Service]
+Type=oneshot
+User=partsouq-crawler
+Group=partsouq-crawler
+WorkingDirectory=/opt/partsouq-crawler/current
+EnvironmentFile=/etc/partsouq-crawler/monthly.env
+ExecStart=/opt/partsouq-crawler/current/scripts/run_monthly_sync.sh
+TimeoutStartSec=infinity
+Restart=on-failure
+RestartSec=12h
+SuccessExitStatus=2
+KillSignal=SIGTERM
+KillMode=control-group
+StateDirectory=partsouq-crawler
+CacheDirectory=partsouq-crawler
+UMask=0077
+# Keep Chrome's Linux sandbox available. NoNewPrivileges blocks its setuid
+# fallback on hosts where unprivileged user namespaces are disabled.
+NoNewPrivileges=false
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/partsouq-crawler /var/cache/partsouq-crawler
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

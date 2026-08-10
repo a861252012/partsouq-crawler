@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from partsouq_crawler.cli import build_parser, dispatch
-from partsouq_crawler.config import CrawlerConfig
+from partsouq_crawler.config import CrawlerConfig, PartSouqMySQLConfig
 from partsouq_crawler.db.repository import Repository
 from partsouq_crawler.models.crawl import FetchResult
 from partsouq_crawler.parsers.base import CatalogParser
@@ -14,20 +14,24 @@ from tests.unit.test_parsers_ingest import PARTS_HTML
 
 
 def test_config_from_env_and_validation(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("PARTSOUQ_DATABASE", str(tmp_path / "env.sqlite3"))
+    monkeypatch.setenv("PARTSOUQ_MYSQL_DATABASE", "partsouq_test")
+    monkeypatch.setenv("PARTSOUQ_MYSQL_PASSWORD", "secret")
     monkeypatch.setenv("PARTSOUQ_CONCURRENCY", "2")
     monkeypatch.setenv("PARTSOUQ_DELAY_SECONDS", "1.5")
     monkeypatch.setenv("PARTSOUQ_REQUEST_TIMEOUT_SECONDS", "9")
     monkeypatch.setenv("PARTSOUQ_MAX_RETRIES", "4")
     monkeypatch.setenv("PARTSOUQ_USER_AGENT", "test-agent")
     config = CrawlerConfig.from_env(max_pages=12, max_depth=3)
-    assert config.database == tmp_path / "env.sqlite3"
+    mysql = PartSouqMySQLConfig.from_env()
+    assert mysql.database == "partsouq_test"
+    assert mysql.password == "secret"
+    assert "password" not in mysql.public_dict()
     assert config.concurrency == 2
     assert config.delay_seconds == 1.5
     assert config.max_retries == 4
     assert config.max_pages == 12 and config.max_depth == 3
     assert config.user_agent == "test-agent"
-    assert config.public_dict()["database"] == str(tmp_path / "env.sqlite3")
+    assert config.public_dict()["database_backend"] == "mysql"
 
     with pytest.raises(ValueError):
         CrawlerConfig(concurrency=0).validate()
@@ -35,6 +39,8 @@ def test_config_from_env_and_validation(monkeypatch, tmp_path: Path) -> None:
         CrawlerConfig(delay_seconds=-1).validate()
     with pytest.raises(ValueError):
         CrawlerConfig(request_timeout_seconds=0).validate()
+    with pytest.raises(ValueError):
+        CrawlerConfig(max_retries=-1).validate()
     with pytest.raises(ValueError):
         CrawlerConfig(max_pages=-1).validate()
     with pytest.raises(ValueError):
@@ -71,7 +77,41 @@ def test_cli_browser_transport_options() -> None:
     assert args.browser_headless is False
 
 
-def test_cli_database_commands_and_export_service(tmp_path: Path) -> None:
+def test_config_nodriver_transport_requires_dedicated_runtime(tmp_path: Path) -> None:
+    executable = tmp_path / "chrome"
+    executable.write_text("", encoding="utf-8")
+    config = CrawlerConfig(
+        transport="nodriver",
+        browser_executable=executable,
+        browser_profile_dir=tmp_path / "profile",
+        browser_worker_command="python browser_worker/worker.py",
+    )
+
+    config.validate()
+
+
+def test_config_nodriver_rejects_true_headless(tmp_path: Path) -> None:
+    executable = tmp_path / "chrome"
+    executable.write_text("", encoding="utf-8")
+    config = CrawlerConfig(
+        transport="nodriver",
+        browser_executable=executable,
+        browser_profile_dir=tmp_path / "profile",
+        browser_worker_command="python browser_worker/worker.py",
+        browser_headless=True,
+    )
+
+    try:
+        config.validate()
+    except ValueError as error:
+        assert "Xvfb" in str(error)
+    else:
+        raise AssertionError("true headless nodriver configuration was accepted")
+
+
+def test_cli_database_commands_and_export_service(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     async def setup(database: Path) -> int:
         repository = await Repository.create(database)
         run_id = await repository.create_or_get_run("cli-run", [], {})
@@ -112,7 +152,14 @@ def test_cli_database_commands_and_export_service(tmp_path: Path) -> None:
 
     database = tmp_path / "cli.sqlite3"
     response_id = asyncio.run(setup(database))
-    base = ["--sqlite", str(database)]
+
+    async def create_test_repository(
+        _cls: type[Repository], _config: PartSouqMySQLConfig
+    ) -> Repository:
+        return await Repository.create(database)
+
+    monkeypatch.setattr(Repository, "create_mysql", classmethod(create_test_repository))
+    base: list[str] = []
     assert asyncio.run(command(["db-status", *base])) == 0
     assert asyncio.run(command(["crawl-status", *base, "--run-id", "cli-run"])) == 0
 
@@ -173,12 +220,3 @@ def test_cli_database_commands_and_export_service(tmp_path: Path) -> None:
     exported = tmp_path / "fitments.csv"
     assert asyncio.run(command(["export", *base, "--output", str(exported)])) == 0
     assert "00123-AB" in exported.read_text(encoding="utf-8-sig")
-
-    backup = tmp_path / "backup.sqlite3"
-    assert asyncio.run(command(["db-backup", *base, "--output", str(backup)])) == 0
-    assert backup.exists()
-
-    snapshot = tmp_path / "partsouq-current.sqlite3"
-    assert asyncio.run(command(["snapshot-publish", *base, "--output", str(snapshot)])) == 0
-    assert snapshot.exists()
-    assert snapshot.with_name(f"{snapshot.name}.manifest.json").exists()

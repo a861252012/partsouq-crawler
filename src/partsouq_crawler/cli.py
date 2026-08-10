@@ -4,13 +4,22 @@ import argparse
 import asyncio
 import csv
 import json
+import os
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pymysql
 
-from partsouq_crawler.config import DEFAULT_SEED, CrawlerConfig
+from partsouq_crawler.config import (
+    DEFAULT_PARTSOUQ_DELAY_SECONDS,
+    DEFAULT_PARTSOUQ_MAX_RETRIES,
+    DEFAULT_SEED,
+    CrawlerConfig,
+    PartSouqMySQLConfig,
+)
 from partsouq_crawler.crawl.challenge import detect_challenge
 from partsouq_crawler.crawl.engine import CrawlerEngine
 from partsouq_crawler.crawl.fetcher import FetchError
@@ -20,7 +29,7 @@ from partsouq_crawler.crawl.transport import create_fetch_transport
 from partsouq_crawler.db.repository import Repository
 from partsouq_crawler.logging import CrawlLogger
 from partsouq_crawler.nhtsa.api_service import NhtsaApiSyncService
-from partsouq_crawler.nhtsa.config import NhtsaConfig
+from partsouq_crawler.nhtsa.config import DEFAULT_NHTSA_API_DELAY_SECONDS, NhtsaConfig
 from partsouq_crawler.nhtsa.datasets import BULK_SOURCES_BY_SCOPE
 from partsouq_crawler.nhtsa.repository import NhtsaMySQLRepository
 from partsouq_crawler.nhtsa.service import NhtsaBulkSyncService
@@ -29,7 +38,11 @@ from partsouq_crawler.services.archive_import import ArchiveCaptureInput, Archiv
 from partsouq_crawler.services.common_crawl_import import CommonCrawlImportService
 from partsouq_crawler.services.export import ExportService
 from partsouq_crawler.services.ingest import IngestService
+from partsouq_crawler.services.monthly_sync import MonthlySourceCommand, MonthlySyncService
 from partsouq_crawler.services.reparse import ReparseService
+from partsouq_crawler.services.sqlite_archive_import import SQLiteArchiveImportService
+from partsouq_crawler.services.station_catalog import StationCatalogService
+from partsouq_crawler.services.wayback_import import WaybackImportService
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -38,82 +51,81 @@ def build_parser() -> argparse.ArgumentParser:
 
     probe = subparsers.add_parser("probe", help="Fetch one URL once and store its response")
     probe.add_argument("url")
-    _database_argument(probe)
+    _partsouq_mysql_arguments(probe)
     probe.add_argument("--run-id", default="partsouq-live-probe")
     probe.add_argument("--user-agent")
     probe.add_argument("--timeout", type=float, default=30.0)
     _transport_arguments(probe)
 
     crawl = subparsers.add_parser("crawl-all", help="Resume or start full discovery crawl")
-    _database_argument(crawl)
+    _partsouq_mysql_arguments(crawl)
     crawl.add_argument("--run-id", required=True)
     crawl.add_argument("--seed-url", default=DEFAULT_SEED)
     crawl.add_argument("--max-pages", type=int, default=0)
     crawl.add_argument("--max-depth", type=int, default=0)
     crawl.add_argument("--concurrency", type=int, default=1)
-    crawl.add_argument("--delay", type=float, default=5.0)
+    crawl.add_argument("--delay", type=float, default=DEFAULT_PARTSOUQ_DELAY_SECONDS)
     crawl.add_argument("--timeout", type=float, default=30.0)
-    crawl.add_argument("--retry-count", type=int, default=3)
+    crawl.add_argument("--retry-count", type=int, default=DEFAULT_PARTSOUQ_MAX_RETRIES)
     crawl.add_argument("--robots-policy", choices=("require", "ignore"), default="require")
     crawl.add_argument("--user-agent")
     crawl.add_argument("--json-log", action="store_true")
+    crawl.add_argument("--retry-challenges", action="store_true")
     _transport_arguments(crawl)
 
     status = subparsers.add_parser("crawl-status")
-    _database_argument(status)
+    _partsouq_mysql_arguments(status)
     status.add_argument("--run-id", required=True)
 
     db_status = subparsers.add_parser("db-status")
-    _database_argument(db_status)
+    _partsouq_mysql_arguments(db_status)
 
     problems = subparsers.add_parser("problem-urls")
-    _database_argument(problems)
+    _partsouq_mysql_arguments(problems)
     problems.add_argument("--run-id", required=True)
     problems.add_argument("--format", choices=("jsonl", "csv"), default="jsonl")
     problems.add_argument("--output", type=Path)
 
     requeue = subparsers.add_parser("requeue-problems")
-    _database_argument(requeue)
+    _partsouq_mysql_arguments(requeue)
     requeue.add_argument("--run-id", required=True)
     requeue.add_argument(
         "--status", action="append", choices=("failed", "parse_failed", "challenged"), required=True
     )
 
     dump = subparsers.add_parser("dump-response")
-    _database_argument(dump)
+    _partsouq_mysql_arguments(dump)
     dump.add_argument("--response-id", type=int)
     dump.add_argument("--url")
     dump.add_argument("--sha256")
     dump.add_argument("--output", type=Path, required=True)
 
     reparse = subparsers.add_parser("reparse")
-    _database_argument(reparse)
+    _partsouq_mysql_arguments(reparse)
     reparse.add_argument("--response-id", type=int)
     reparse.add_argument("--run-id", type=int)
     reparse.add_argument("--page-type")
+    reparse.add_argument("--batch-size", type=int, default=250)
+
+    taxonomy_repair = subparsers.add_parser(
+        "repair-taxonomy",
+        help="Preview or remove parser-v2 navigation breadcrumbs from normalized taxonomy",
+    )
+    _partsouq_mysql_arguments(taxonomy_repair)
+    taxonomy_repair.add_argument("--apply", action="store_true")
 
     export = subparsers.add_parser("export")
-    _database_argument(export)
+    _partsouq_mysql_arguments(export)
     export.add_argument("--output", type=Path, required=True)
     export.add_argument("--include-compatibility-hints", action="store_true")
     export.add_argument("--include-unverified-fitments", action="store_true")
-
-    backup = subparsers.add_parser("db-backup")
-    _database_argument(backup)
-    backup.add_argument("--output", type=Path, required=True)
-
-    publish = subparsers.add_parser(
-        "snapshot-publish",
-        help="Validate and atomically publish a read-only database snapshot",
-    )
-    _database_argument(publish)
-    publish.add_argument("--output", type=Path, required=True)
+    export.add_argument("--include-sensitive-source-urls", action="store_true")
 
     archive_import = subparsers.add_parser(
         "archive-import",
         help="Import a lawfully obtained historical HTML capture without contacting PartSouq",
     )
-    _database_argument(archive_import)
+    _partsouq_mysql_arguments(archive_import)
     archive_import.add_argument("--run-id", required=True)
     archive_import.add_argument("--input", type=Path, required=True)
     archive_import.add_argument("--source-url", required=True)
@@ -132,14 +144,34 @@ def build_parser() -> argparse.ArgumentParser:
 
     common_crawl_import = subparsers.add_parser(
         "common-crawl-import",
-        help="Download diagram WARC records listed in Common Crawl index files",
+        help="Import allowlisted PartSouq WARC records from Common Crawl index files",
     )
-    _database_argument(common_crawl_import)
+    _partsouq_mysql_arguments(common_crawl_import)
     common_crawl_import.add_argument("--run-id", required=True)
     common_crawl_import.add_argument("--index", type=Path, action="append", required=True)
     common_crawl_import.add_argument("--max-records", type=int, default=0)
     common_crawl_import.add_argument("--delay", type=float, default=0.25)
     common_crawl_import.add_argument("--timeout", type=float, default=60.0)
+
+    wayback_import = subparsers.add_parser(
+        "wayback-import",
+        help="Import allowlisted PartSouq captures from local Wayback CDX JSON files",
+    )
+    _partsouq_mysql_arguments(wayback_import)
+    wayback_import.add_argument("--run-id", required=True)
+    wayback_import.add_argument("--index", type=Path, action="append", required=True)
+    wayback_import.add_argument("--max-records", type=int, default=0)
+    wayback_import.add_argument("--delay", type=float, default=2.0)
+    wayback_import.add_argument("--timeout", type=float, default=60.0)
+
+    sqlite_migrate = subparsers.add_parser(
+        "sqlite-archive-migrate",
+        help="Migrate a legacy archive snapshot into the production MySQL schema",
+    )
+    _partsouq_mysql_arguments(sqlite_migrate)
+    sqlite_migrate.add_argument("--source-sqlite", type=Path, required=True)
+    sqlite_migrate.add_argument("--run-id")
+    sqlite_migrate.add_argument("--batch-size", type=int, default=100)
 
     nhtsa_sync = subparsers.add_parser(
         "nhtsa-sync-bulk",
@@ -161,19 +193,57 @@ def build_parser() -> argparse.ArgumentParser:
     nhtsa_api.add_argument("--run-id", default="nhtsa-official-api")
     nhtsa_api.add_argument("--scope", choices=("all", "vpic", "cssi"), default="all")
 
+    station_sync = subparsers.add_parser(
+        "station-sync",
+        help="Refresh station term mappings, VIN decoding, fitments, and reconciliation",
+    )
+    _partsouq_mysql_arguments(station_sync)
+    station_sync.add_argument("--run-id", required=True)
+    station_sync.add_argument("--nhtsa-user-agent")
+    station_sync.add_argument("--nhtsa-timeout", type=float)
+    station_sync.add_argument("--nhtsa-api-delay", type=float)
+    station_sync.add_argument("--json-log", action="store_true")
+
     nhtsa_status = subparsers.add_parser("nhtsa-status")
     _nhtsa_arguments(nhtsa_status, include_runtime=False)
+
+    monthly_sync = subparsers.add_parser(
+        "monthly-sync",
+        help="Run the resumable monthly NHTSA and PartSouq collection",
+    )
+    _partsouq_mysql_arguments(monthly_sync)
+    monthly_sync.add_argument("--period", help="calendar month in YYYY-MM")
+    monthly_sync.add_argument("--timezone", default="Asia/Taipei")
+    monthly_sync.add_argument("--lease-seconds", type=int, default=300)
+    monthly_sync.add_argument("--heartbeat-seconds", type=float, default=60)
+    monthly_sync.add_argument("--max-attempts", type=int, default=3)
+
+    monthly_status = subparsers.add_parser("monthly-status")
+    _partsouq_mysql_arguments(monthly_status)
+    monthly_status.add_argument("--period", help="calendar month in YYYY-MM")
+    monthly_status.add_argument("--timezone", default="Asia/Taipei")
+    monthly_status.add_argument("--event-limit", type=int, default=100)
     return parser
 
 
-def _database_argument(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--sqlite", type=Path, default=Path("output/partsouq-live.sqlite3"))
+def _partsouq_mysql_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--mysql-host")
+    parser.add_argument("--mysql-port", type=int)
+    parser.add_argument("--mysql-database")
+    parser.add_argument("--mysql-user")
+    parser.add_argument("--mysql-password")
+    parser.add_argument("--mysql-pool-min", type=int)
+    parser.add_argument("--mysql-pool-max", type=int)
 
 
 def _transport_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--transport", choices=("http", "browser"), default="http")
+    parser.add_argument("--transport", choices=("http", "browser", "nodriver"), default="http")
     parser.add_argument("--browser-executable", type=Path)
     parser.add_argument("--browser-headless", action="store_true")
+    parser.add_argument("--browser-profile-dir", type=Path)
+    parser.add_argument("--browser-worker-command")
+    parser.add_argument("--browser-challenge-wait", type=float)
+    parser.add_argument("--browser-restart-pages", type=int)
 
 
 def _nhtsa_arguments(parser: argparse.ArgumentParser, *, include_runtime: bool = True) -> None:
@@ -187,18 +257,61 @@ def _nhtsa_arguments(parser: argparse.ArgumentParser, *, include_runtime: bool =
         parser.add_argument("--user-agent")
         parser.add_argument("--timeout", type=float)
         parser.add_argument("--api-delay", type=float)
+        parser.add_argument("--json-log", action="store_true")
 
 
 async def dispatch(args: argparse.Namespace) -> int:
     if args.command.startswith("nhtsa-"):
         return await _dispatch_nhtsa(args)
-    repository = await Repository.create(args.sqlite)
+    mysql_config = PartSouqMySQLConfig.from_env(
+        host=args.mysql_host,
+        port=args.mysql_port,
+        database=args.mysql_database,
+        user=args.mysql_user,
+        password=args.mysql_password,
+        pool_min_size=args.mysql_pool_min,
+        pool_max_size=args.mysql_pool_max,
+    )
+    repository = await Repository.create_mysql(mysql_config)
     try:
+        if args.command == "monthly-sync":
+            period_key, scheduled_for = _monthly_period(args.period, args.timezone)
+            report = await MonthlySyncService(
+                repository,
+                lease_seconds=args.lease_seconds,
+                heartbeat_seconds=args.heartbeat_seconds,
+                max_attempts=args.max_attempts,
+                logger=CrawlLogger(json_mode=True),
+            ).run(
+                period_key=period_key,
+                scheduled_for=scheduled_for,
+                commands=_monthly_commands(period_key, mysql_config),
+            )
+            _print_json(report)
+            return int(str(report["exit_code"]))
+        if args.command == "monthly-status":
+            period_key, _ = _monthly_period(args.period, args.timezone)
+            _print_json(
+                await repository.monthly_run_report(period_key, event_limit=args.event_limit)
+            )
+            return 0
+        if args.command == "station-sync":
+            nhtsa_config = NhtsaConfig.from_env(
+                user_agent=args.nhtsa_user_agent,
+                request_timeout_seconds=args.nhtsa_timeout,
+                api_delay_seconds=args.nhtsa_api_delay,
+            )
+            station_report = await StationCatalogService(
+                repository,
+                nhtsa_config,
+                logger=CrawlLogger(json_mode=args.json_log),
+            ).run(run_key=args.run_id)
+            _print_json(station_report)
+            return 0 if station_report["status"] == "completed" else 2
         if args.command == "probe":
             return await _probe(repository, args)
         if args.command == "crawl-all":
             config = CrawlerConfig.from_env(
-                database=args.sqlite,
                 concurrency=args.concurrency,
                 delay_seconds=args.delay,
                 request_timeout_seconds=args.timeout,
@@ -211,6 +324,11 @@ async def dispatch(args: argparse.Namespace) -> int:
                 transport=args.transport,
                 browser_executable=args.browser_executable,
                 browser_headless=args.browser_headless,
+                browser_profile_dir=args.browser_profile_dir,
+                browser_worker_command=args.browser_worker_command,
+                browser_challenge_wait_seconds=args.browser_challenge_wait,
+                browser_restart_pages=args.browser_restart_pages,
+                retry_challenges=args.retry_challenges,
             )
             engine = CrawlerEngine(
                 repository=repository,
@@ -241,24 +359,23 @@ async def dispatch(args: argparse.Namespace) -> int:
                 response_id=args.response_id,
                 run_id=args.run_id,
                 page_type=args.page_type,
+                batch_size=args.batch_size,
             )
             _print_json(reparse_report)
             return 0 if reparse_report["failed"] == 0 else 1
+        if args.command == "repair-taxonomy":
+            _print_json(
+                await ReparseService(repository).repair_legacy_navigation_taxonomy(apply=args.apply)
+            )
+            return 0
         if args.command == "export":
             count = await ExportService(repository).export(
                 args.output,
                 include_compatibility_hints=args.include_compatibility_hints,
                 include_unverified_fitments=args.include_unverified_fitments,
+                include_sensitive_source_urls=args.include_sensitive_source_urls,
             )
             _print_json({"output": str(args.output), "rows": count})
-            return 0
-        if args.command == "db-backup":
-            await repository.backup(args.output)
-            _print_json({"backup": str(args.output)})
-            return 0
-        if args.command == "snapshot-publish":
-            manifest = await repository.publish_snapshot(args.output)
-            _print_json({"snapshot": str(args.output), "manifest": manifest})
             return 0
         if args.command == "archive-import":
             archive_report = await ArchiveImportService(repository).import_html(
@@ -288,6 +405,31 @@ async def dispatch(args: argparse.Namespace) -> int:
             )
             _print_json(common_crawl_report)
             return 0 if common_crawl_report["failed"] == 0 else 1
+        if args.command == "wayback-import":
+            wayback_report = await WaybackImportService(repository).run(
+                run_key=args.run_id,
+                index_paths=args.index,
+                max_records=args.max_records,
+                delay_seconds=args.delay,
+                timeout_seconds=args.timeout,
+            )
+            _print_json(wayback_report)
+            queue = wayback_report["queue"]
+            return 0 if isinstance(queue, dict) and queue.get("failed", 0) == 0 else 1
+        if args.command == "sqlite-archive-migrate":
+            migration_report = await SQLiteArchiveImportService(repository).run(
+                sqlite_path=args.source_sqlite,
+                run_key=args.run_id,
+                batch_size=args.batch_size,
+            )
+            _print_json(migration_report)
+            failed = bool(
+                migration_report["quarantined"]
+                or migration_report["missing_provenance"]
+                or migration_report["orphans"]
+                or migration_report["foreign_key_violations"]
+            )
+            return 1 if failed else 0
         raise ValueError(f"unsupported command: {args.command}")
     finally:
         await repository.close()
@@ -316,7 +458,11 @@ async def _dispatch_nhtsa(args: argparse.Namespace) -> int:
             return 0
         if args.command == "nhtsa-sync-bulk":
             sources = BULK_SOURCES_BY_SCOPE[args.scope]
-            report = await NhtsaBulkSyncService(repository, config).run(
+            report = await NhtsaBulkSyncService(
+                repository,
+                config,
+                logger=CrawlLogger(json_mode=args.json_log),
+            ).run(
                 run_key=args.run_id,
                 scope_name=args.scope,
                 sources=sources,
@@ -324,7 +470,11 @@ async def _dispatch_nhtsa(args: argparse.Namespace) -> int:
             _print_json(report)
             return 0 if report["status"] == "completed" else 1
         if args.command == "nhtsa-sync-api":
-            report = await NhtsaApiSyncService(repository, config).run(
+            report = await NhtsaApiSyncService(
+                repository,
+                config,
+                logger=CrawlLogger(json_mode=args.json_log),
+            ).run(
                 run_key=args.run_id,
                 scope_name=args.scope,
             )
@@ -335,9 +485,171 @@ async def _dispatch_nhtsa(args: argparse.Namespace) -> int:
         repository.close()
 
 
+def _monthly_period(period: str | None, timezone_name: str) -> tuple[str, str]:
+    timezone = ZoneInfo(timezone_name)
+    if period is None:
+        now = datetime.now(timezone)
+        period = f"{now.year:04d}-{now.month:02d}"
+    try:
+        parsed = datetime.strptime(period, "%Y-%m")
+    except ValueError as error:
+        raise ValueError("monthly period must use YYYY-MM") from error
+    if parsed.strftime("%Y-%m") != period:
+        raise ValueError("monthly period must use YYYY-MM")
+    scheduled = datetime(parsed.year, parsed.month, 1, 1, tzinfo=timezone)
+    return period, scheduled.astimezone(UTC).isoformat()
+
+
+def _monthly_commands(
+    period_key: str,
+    mysql_config: PartSouqMySQLConfig,
+) -> tuple[MonthlySourceCommand, ...]:
+    module = (sys.executable, "-m", "partsouq_crawler")
+    partsouq_delay = max(
+        DEFAULT_PARTSOUQ_DELAY_SECONDS,
+        float(
+            os.getenv(
+                "PARTSOUQ_DELAY_SECONDS",
+                str(DEFAULT_PARTSOUQ_DELAY_SECONDS),
+            )
+        ),
+    )
+    partsouq_retries = min(
+        DEFAULT_PARTSOUQ_MAX_RETRIES,
+        max(
+            0,
+            int(
+                os.getenv(
+                    "PARTSOUQ_MAX_RETRIES",
+                    str(DEFAULT_PARTSOUQ_MAX_RETRIES),
+                )
+            ),
+        ),
+    )
+    nhtsa_delay = max(
+        DEFAULT_NHTSA_API_DELAY_SECONDS,
+        float(
+            os.getenv(
+                "NHTSA_API_DELAY_SECONDS",
+                str(DEFAULT_NHTSA_API_DELAY_SECONDS),
+            )
+        ),
+    )
+    partsouq_transport = os.getenv("PARTSOUQ_TRANSPORT", "browser").strip().lower()
+    if partsouq_transport not in {"browser", "http"}:
+        raise ValueError("monthly PartSouq transport must be browser or http")
+    child_environment = {
+        "PYTHONUNBUFFERED": "1",
+        "PARTSOUQ_MYSQL_HOST": mysql_config.host,
+        "PARTSOUQ_MYSQL_PORT": str(mysql_config.port),
+        "PARTSOUQ_MYSQL_DATABASE": mysql_config.database,
+        "PARTSOUQ_MYSQL_USER": mysql_config.user,
+        "PARTSOUQ_MYSQL_PASSWORD": mysql_config.password,
+        "PARTSOUQ_MYSQL_POOL_MIN_SIZE": str(mysql_config.pool_min_size),
+        "PARTSOUQ_MYSQL_POOL_MAX_SIZE": str(mysql_config.pool_max_size),
+    }
+    partsouq_command = [
+        *module,
+        "crawl-all",
+        "--run-id",
+        f"monthly-{period_key}-partsouq",
+        "--seed-url",
+        os.getenv("PARTSOUQ_SEED_URL", DEFAULT_SEED),
+        "--max-pages",
+        "0",
+        "--max-depth",
+        "0",
+        "--concurrency",
+        "1",
+        "--delay",
+        str(partsouq_delay),
+        "--timeout",
+        os.getenv("PARTSOUQ_REQUEST_TIMEOUT_SECONDS", "60"),
+        "--retry-count",
+        str(partsouq_retries),
+        "--robots-policy",
+        "require",
+        "--user-agent",
+        os.getenv("PARTSOUQ_USER_AGENT", "partsouq-monthly-sync/0.1"),
+        "--transport",
+        partsouq_transport,
+    ]
+    if partsouq_transport == "browser":
+        executable = os.getenv("PARTSOUQ_BROWSER_EXECUTABLE", "").strip()
+        if executable:
+            partsouq_command.extend(("--browser-executable", executable))
+        if os.getenv("PARTSOUQ_BROWSER_HEADLESS", "1").lower() in {"1", "true", "yes"}:
+            partsouq_command.append("--browser-headless")
+        partsouq_command.extend(
+            (
+                "--browser-challenge-wait",
+                os.getenv("PARTSOUQ_BROWSER_CHALLENGE_WAIT_SECONDS", "60"),
+            )
+        )
+    partsouq_command.append("--json-log")
+    return (
+        MonthlySourceCommand(
+            source_name="nhtsa_bulk",
+            run_key=f"monthly-{period_key}-nhtsa-bulk",
+            command=(
+                *module,
+                "nhtsa-sync-bulk",
+                "--run-id",
+                f"monthly-{period_key}-nhtsa-bulk",
+                "--scope",
+                "all",
+                "--json-log",
+            ),
+            environment={
+                "PYTHONUNBUFFERED": "1",
+                "NHTSA_API_DELAY_SECONDS": str(nhtsa_delay),
+            },
+        ),
+        MonthlySourceCommand(
+            source_name="nhtsa_api",
+            run_key=f"monthly-{period_key}-nhtsa-api",
+            command=(
+                *module,
+                "nhtsa-sync-api",
+                "--run-id",
+                f"monthly-{period_key}-nhtsa-api",
+                "--scope",
+                "all",
+                "--json-log",
+            ),
+            environment={
+                "PYTHONUNBUFFERED": "1",
+                "NHTSA_API_DELAY_SECONDS": str(nhtsa_delay),
+            },
+        ),
+        MonthlySourceCommand(
+            source_name="station",
+            run_key=f"monthly-{period_key}-station",
+            command=(
+                *module,
+                "station-sync",
+                "--run-id",
+                f"monthly-{period_key}-station",
+                "--json-log",
+            ),
+            environment={
+                **child_environment,
+                "NHTSA_USER_AGENT": os.getenv("NHTSA_USER_AGENT", "nhtsa-official-data-sync/0.1"),
+                "NHTSA_REQUEST_TIMEOUT_SECONDS": os.getenv("NHTSA_REQUEST_TIMEOUT_SECONDS", "120"),
+                "NHTSA_API_DELAY_SECONDS": str(nhtsa_delay),
+            },
+        ),
+        MonthlySourceCommand(
+            source_name="partsouq",
+            run_key=f"monthly-{period_key}-partsouq",
+            command=tuple(partsouq_command),
+            environment=child_environment,
+        ),
+    )
+
+
 async def _probe(repository: Repository, args: argparse.Namespace) -> int:
     config = CrawlerConfig.from_env(
-        database=args.sqlite,
         request_timeout_seconds=args.timeout,
         max_retries=0,
         user_agent=args.user_agent,
@@ -345,6 +657,10 @@ async def _probe(repository: Repository, args: argparse.Namespace) -> int:
         transport=args.transport,
         browser_executable=args.browser_executable,
         browser_headless=args.browser_headless,
+        browser_profile_dir=args.browser_profile_dir,
+        browser_worker_command=args.browser_worker_command,
+        browser_challenge_wait_seconds=args.browser_challenge_wait,
+        browser_restart_pages=args.browser_restart_pages,
     )
     run_id = await repository.create_or_get_run(args.run_id, [args.url], config.public_dict())
     await repository.set_run_status(run_id, "running")

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 
 @dataclass(frozen=True, slots=True)
@@ -344,15 +346,17 @@ RECALL_SOURCES = (
     ),
 )
 
-COMPLAINT_PERIODS = (
-    "1995-1999",
-    "2000-2004",
-    "2005-2009",
-    "2010-2014",
-    "2015-2019",
-    "2020-2024",
-    "2025-2026",
-)
+
+def received_date_periods(current_year: int) -> tuple[str, ...]:
+    if current_year < 1995:
+        raise ValueError("NHTSA received-date coverage starts in 1995")
+    return tuple(
+        f"{start_year}-{min(start_year + 4, current_year)}"
+        for start_year in range(1995, current_year + 1, 5)
+    )
+
+
+COMPLAINT_PERIODS = received_date_periods(datetime.now(ZoneInfo("America/New_York")).year)
 COMMUNICATION_PERIODS = COMPLAINT_PERIODS
 
 COMPLAINT_SOURCES = tuple(
