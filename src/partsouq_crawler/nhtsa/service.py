@@ -7,6 +7,7 @@ from typing import Any
 
 import pymysql
 
+from partsouq_crawler.logging import CrawlLogger
 from partsouq_crawler.nhtsa.client import NhtsaBulkClient
 from partsouq_crawler.nhtsa.config import NhtsaConfig
 from partsouq_crawler.nhtsa.datasets import DATASET_SPECS, BulkSource
@@ -19,6 +20,7 @@ from partsouq_crawler.nhtsa.repository import (
 )
 
 BATCH_SIZE = 5000
+PROGRESS_ROWS = 100_000
 
 
 class NhtsaBulkSyncService:
@@ -28,10 +30,12 @@ class NhtsaBulkSyncService:
         config: NhtsaConfig,
         *,
         parser: BulkArtifactParser | None = None,
+        logger: CrawlLogger | None = None,
     ) -> None:
         self.repository = repository
         self.config = config
         self.parser = parser or BulkArtifactParser()
+        self.logger = logger
         self.writer = NhtsaRecordWriter(repository)
 
     async def run(
@@ -49,9 +53,21 @@ class NhtsaBulkSyncService:
         rejected_rows = 0
         publishable: list[tuple[str, str, int]] = []
         active_artifact_id: int | None = None
+        self._event(
+            "nhtsa_bulk_run_started",
+            run_key=run_key,
+            scope=scope_name,
+            source_count=len(sources),
+        )
         try:
             async with NhtsaBulkClient(self.config) as client:
                 for source in sources:
+                    self._event(
+                        "nhtsa_bulk_source_started",
+                        run_key=run_key,
+                        source_key=source.key,
+                        dataset=source.dataset_name,
+                    )
                     spec = DATASET_SPECS[source.dataset_name]
                     current = self.repository.current_artifact(source.dataset_name, source.key)
                     download = await client.download(source, current_artifact=current)
@@ -61,6 +77,12 @@ class NhtsaBulkSyncService:
                         publishable.append((source.dataset_name, source.key, artifact_id))
                         if current:
                             source_rows += int(str(current["source_rows"]))
+                        self._event(
+                            "nhtsa_bulk_source_reused",
+                            run_key=run_key,
+                            source_key=source.key,
+                            artifact_id=artifact_id,
+                        )
                         continue
 
                     if download.sha256 is None or download.path is None:
@@ -76,6 +98,12 @@ class NhtsaBulkSyncService:
                         artifact_id = int(str(existing["id"]))
                         source_rows += int(str(existing["source_rows"]))
                         publishable.append((source.dataset_name, source.key, artifact_id))
+                        self._event(
+                            "nhtsa_bulk_source_reused",
+                            run_key=run_key,
+                            source_key=source.key,
+                            artifact_id=artifact_id,
+                        )
                         continue
                     if existing and existing["status"] == "quarantined":
                         raise ValueError(
@@ -120,6 +148,14 @@ class NhtsaBulkSyncService:
                             f"{artifact_source_rows} source rows"
                         )
                     publishable.append((source.dataset_name, source.key, artifact_id))
+                    self._event(
+                        "nhtsa_bulk_source_completed",
+                        run_key=run_key,
+                        source_key=source.key,
+                        artifact_id=artifact_id,
+                        source_rows=artifact_source_rows,
+                        new_versions=artifact_new_versions,
+                    )
                     active_artifact_id = None
 
             self.repository.publish_artifacts(publishable)
@@ -131,6 +167,13 @@ class NhtsaBulkSyncService:
                 source_rows=source_rows,
                 new_versions=new_versions,
                 rejected_rows=rejected_rows,
+            )
+            self._event(
+                "nhtsa_bulk_run_completed",
+                run_key=run_key,
+                source_rows=source_rows,
+                downloaded=downloaded,
+                reused=reused,
             )
             return {
                 "run_id": run_id,
@@ -169,6 +212,13 @@ class NhtsaBulkSyncService:
                 rejected_rows=rejected_rows,
                 error_message=f"{type(error).__name__}: {error}",
             )
+            self._event(
+                "nhtsa_bulk_run_failed",
+                run_key=run_key,
+                status="failed",
+                error_type=type(error).__name__,
+                error=str(error),
+            )
             return {
                 "run_id": run_id,
                 "run_key": run_key,
@@ -199,6 +249,14 @@ class NhtsaBulkSyncService:
         rejected_rows = 0
         for item in self.parser.iter_records(path, source, spec, member):
             source_rows += 1
+            if source_rows % PROGRESS_ROWS == 0:
+                self._event(
+                    "nhtsa_bulk_import_progress",
+                    source_key=source.key,
+                    source_rows=source_rows,
+                    new_versions=new_versions,
+                    rejected_rows=rejected_rows,
+                )
             if isinstance(item, RejectedRow):
                 rejections.append(item)
                 if len(rejections) >= BATCH_SIZE:
@@ -220,6 +278,10 @@ class NhtsaBulkSyncService:
             self.repository.insert_rejections(artifact_id, rejections)
             rejected_rows += len(rejections)
         return source_rows, new_versions, rejected_rows
+
+    def _event(self, event: str, **fields: object) -> None:
+        if self.logger is not None:
+            self.logger.event(event, **fields)
 
 
 class NhtsaRecordWriter:

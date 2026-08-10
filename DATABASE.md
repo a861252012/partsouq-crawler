@@ -24,6 +24,8 @@ vehicle_configurations 1 ── n taxonomy_nodes            │
 
 part_numbers 1 ── n compatibility_hints
 part_numbers 1 ── n part_relations
+
+monthly_sync_runs 1 ── n monthly_sync_events
 ```
 
 ### State、raw 與 archive
@@ -42,6 +44,8 @@ part_numbers 1 ── n part_relations
 | `sqlite_imports` / `sqlite_import_items` | 舊 SQLite snapshot 的唯讀遷移 manifest、cursor、reconciliation 與 quarantine。 |
 | `parse_failures` | parser/type/error/context；raw HTML 不重複存放。 |
 | `robots_snapshots` | robots response、User-Agent 與 body hash 的稽核快照。 |
+| `monthly_sync_runs` | 每月 `YYYY-MM` 唯一 run、owner、lease、fencing、attempt、三個 source 狀態／run key 與 summary。 |
+| `monthly_sync_events` | NHTSA／PartSouq child stdout、錯誤、progress 與 orchestrator lifecycle；依 run/source/type 可查。 |
 
 ### Normalized 與 provenance
 
@@ -101,6 +105,7 @@ partsouq-crawler dump-response \
 
 ```bash
 partsouq-crawler db-status
+partsouq-crawler monthly-status --period 2026-08 --event-limit 200
 
 docker exec -e MYSQL_PWD="$PARTSOUQ_MYSQL_PASSWORD" \
   nhtsa-mysql mysql -upartsouq partsouq -e '

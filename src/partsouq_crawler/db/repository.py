@@ -21,6 +21,7 @@ from partsouq_crawler.db.migrations import migrate
 from partsouq_crawler.db.mysql_connection import MySQLPoolConnection, create_mysql_connection
 from partsouq_crawler.db.protocols import AsyncConnection, DatabaseRow
 from partsouq_crawler.models.crawl import FetchResult, QueueItem
+from partsouq_crawler.models.schedule import MonthlyRunLease
 
 QUEUE_STATUSES = (
     "pending",
@@ -173,6 +174,298 @@ class Repository:
                 """,
                 (status, blocked_reason, now, ended, now, run_id),
             )
+
+    async def acquire_monthly_run(
+        self,
+        *,
+        period_key: str,
+        scheduled_for: str,
+        owner_id: str,
+        lease_seconds: int,
+        max_attempts: int,
+        config: Mapping[str, object],
+    ) -> MonthlyRunLease:
+        if self.backend_name != "mysql":
+            raise ValueError("monthly sync requires MySQL")
+        async with self.transaction() as connection:
+            await connection.execute(
+                """
+                INSERT IGNORE INTO monthly_sync_runs(
+                    period_key, scheduled_for, status, max_attempts, config_json,
+                    created_at, updated_at
+                ) VALUES (?, ?, 'created', ?, ?, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))
+                """,
+                (
+                    period_key,
+                    _mysql_datetime(scheduled_for),
+                    max_attempts,
+                    json.dumps(config, sort_keys=True),
+                ),
+            )
+            cursor = await connection.execute(
+                """
+                SELECT *, lease_expires_at > UTC_TIMESTAMP(6) AS lease_active
+                FROM monthly_sync_runs
+                WHERE period_key = ?
+                FOR UPDATE
+                """,
+                (period_key,),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                raise RuntimeError("monthly sync run disappeared")
+            terminal = str(row["status"]) in {"completed", "completed_with_gaps"}
+            lease_active = bool(row["lease_active"])
+            attempts = int(row["attempts"])
+            if terminal or lease_active:
+                return self._monthly_lease(row, acquired=False)
+            if attempts >= int(row["max_attempts"]):
+                await connection.execute(
+                    """
+                    UPDATE monthly_sync_runs
+                    SET status = 'completed_with_gaps', lease_expires_at = NULL,
+                        last_error = COALESCE(
+                            last_error, 'attempt limit exhausted after inactive lease'
+                        ),
+                        updated_at = UTC_TIMESTAMP(6),
+                        ended_at = COALESCE(ended_at, UTC_TIMESTAMP(6))
+                    WHERE id = ?
+                    """,
+                    (row["id"],),
+                )
+                exhausted_cursor = await connection.execute(
+                    "SELECT * FROM monthly_sync_runs WHERE id = ?", (row["id"],)
+                )
+                exhausted = await exhausted_cursor.fetchone()
+                if exhausted is None:
+                    raise RuntimeError("exhausted monthly sync run disappeared")
+                return self._monthly_lease(exhausted, acquired=False)
+            await connection.execute(
+                """
+                UPDATE monthly_sync_runs
+                SET status = 'running', owner_id = ?,
+                    fencing_token = fencing_token + 1,
+                    lease_expires_at = DATE_ADD(
+                        UTC_TIMESTAMP(6), INTERVAL ? SECOND
+                    ),
+                    attempts = attempts + 1,
+                    started_at = COALESCE(started_at, UTC_TIMESTAMP(6)),
+                    heartbeat_at = UTC_TIMESTAMP(6), updated_at = UTC_TIMESTAMP(6),
+                    ended_at = NULL, last_error = NULL
+                WHERE id = ?
+                """,
+                (owner_id, lease_seconds, row["id"]),
+            )
+            refreshed = await connection.execute(
+                "SELECT * FROM monthly_sync_runs WHERE id = ?", (row["id"],)
+            )
+            acquired_row = await refreshed.fetchone()
+        if acquired_row is None:
+            raise RuntimeError("monthly sync run could not be acquired")
+        return self._monthly_lease(acquired_row, acquired=True)
+
+    async def heartbeat_monthly_run(
+        self,
+        run_id: int,
+        *,
+        owner_id: str,
+        fencing_token: int,
+        lease_seconds: int,
+    ) -> None:
+        async with self.transaction() as connection:
+            cursor = await connection.execute(
+                """
+                UPDATE monthly_sync_runs
+                SET heartbeat_at = UTC_TIMESTAMP(6), updated_at = UTC_TIMESTAMP(6),
+                    lease_expires_at = DATE_ADD(
+                        UTC_TIMESTAMP(6), INTERVAL ? SECOND
+                    )
+                WHERE id = ? AND status = 'running'
+                  AND owner_id = ? AND fencing_token = ?
+                """,
+                (lease_seconds, run_id, owner_id, fencing_token),
+            )
+        if cursor.rowcount != 1:
+            raise LeaseLostError(f"monthly sync lease lost: {run_id}")
+
+    async def update_monthly_source(
+        self,
+        run_id: int,
+        *,
+        owner_id: str,
+        fencing_token: int,
+        source_name: str,
+        status: str,
+        run_key: str,
+        error: str | None = None,
+    ) -> None:
+        columns = {
+            "nhtsa_bulk": ("nhtsa_bulk_status", "nhtsa_bulk_run_key"),
+            "nhtsa_api": ("nhtsa_api_status", "nhtsa_api_run_key"),
+            "partsouq": ("partsouq_status", "partsouq_run_key"),
+        }
+        if source_name not in columns:
+            raise ValueError(f"unsupported monthly source: {source_name}")
+        status_column, run_key_column = columns[source_name]
+        async with self.transaction() as connection:
+            cursor = await connection.execute(
+                f"""
+                UPDATE monthly_sync_runs
+                SET {status_column} = ?, {run_key_column} = ?, last_error = ?,
+                    updated_at = UTC_TIMESTAMP(6)
+                WHERE id = ? AND status = 'running'
+                  AND owner_id = ? AND fencing_token = ?
+                """,  # noqa: S608 - columns come from a fixed allowlist.
+                (status, run_key, error, run_id, owner_id, fencing_token),
+            )
+        if cursor.rowcount != 1:
+            raise LeaseLostError(f"monthly sync lease lost before source update: {run_id}")
+
+    async def append_monthly_events(
+        self,
+        run_id: int,
+        fencing_token: int,
+        events: Sequence[Mapping[str, object]],
+    ) -> None:
+        if not events:
+            return
+        rows = [
+            (
+                run_id,
+                fencing_token,
+                str(event.get("source_name", "orchestrator"))[:32],
+                str(event.get("level", "info"))[:16],
+                str(event.get("event_type", "message"))[:64],
+                str(event.get("message", ""))[:16_000],
+                json.dumps(event.get("details", {}), ensure_ascii=False, default=str),
+            )
+            for event in events
+        ]
+        async with self.transaction() as connection:
+            lease_cursor = await connection.execute(
+                """
+                SELECT fencing_token
+                FROM monthly_sync_runs
+                WHERE id = ? AND fencing_token = ?
+                FOR UPDATE
+                """,
+                (run_id, fencing_token),
+            )
+            if await lease_cursor.fetchone() is None:
+                raise LeaseLostError(f"monthly sync lease lost before event insert: {run_id}")
+            await connection.executemany(
+                """
+                INSERT INTO monthly_sync_events(
+                    monthly_run_id, fencing_token, source_name, level,
+                    event_type, message, details_json, occurred_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(6))
+                """,
+                rows,
+            )
+
+    async def finish_monthly_run(
+        self,
+        run_id: int,
+        *,
+        owner_id: str,
+        fencing_token: int,
+        status: str,
+        summary: Mapping[str, object],
+        error: str | None = None,
+    ) -> None:
+        if status not in {"completed", "completed_with_gaps", "failed", "interrupted"}:
+            raise ValueError(f"invalid monthly run status: {status}")
+        async with self.transaction() as connection:
+            cursor = await connection.execute(
+                """
+                UPDATE monthly_sync_runs
+                SET status = ?, summary_json = ?, last_error = ?,
+                    heartbeat_at = UTC_TIMESTAMP(6), updated_at = UTC_TIMESTAMP(6),
+                    ended_at = UTC_TIMESTAMP(6), lease_expires_at = NULL
+                WHERE id = ? AND status = 'running'
+                  AND owner_id = ? AND fencing_token = ?
+                """,
+                (
+                    status,
+                    json.dumps(summary, ensure_ascii=False, default=str),
+                    error,
+                    run_id,
+                    owner_id,
+                    fencing_token,
+                ),
+            )
+        if cursor.rowcount != 1:
+            raise LeaseLostError(f"monthly sync lease lost before finalization: {run_id}")
+
+    async def monthly_run_report(
+        self, period_key: str, *, event_limit: int = 100
+    ) -> dict[str, object]:
+        if not 1 <= event_limit <= 1000:
+            raise ValueError("monthly event limit must be between 1 and 1000")
+        cursor = await self.connection.execute(
+            "SELECT * FROM monthly_sync_runs WHERE period_key = ?", (period_key,)
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            raise KeyError(f"monthly run not found: {period_key}")
+        counts = await self.connection.execute(
+            """
+            SELECT source_name, level, COUNT(*) AS count
+            FROM monthly_sync_events
+            WHERE monthly_run_id = ?
+            GROUP BY source_name, level
+            ORDER BY source_name, level
+            """,
+            (row["id"],),
+        )
+        latest = await self.connection.execute(
+            """
+            SELECT id, fencing_token, source_name, level, event_type,
+                   message, details_json, occurred_at
+            FROM monthly_sync_events
+            WHERE monthly_run_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (row["id"], event_limit),
+        )
+        run = dict(row)
+        for field in ("config_json", "summary_json"):
+            value = run.get(field)
+            if isinstance(value, str):
+                run[field] = json.loads(value)
+        events: list[dict[str, object]] = []
+        event_rows = list(await latest.fetchall())
+        for event_row in reversed(event_rows):
+            event = dict(event_row)
+            details = event.get("details_json")
+            if isinstance(details, str):
+                event["details_json"] = json.loads(details)
+            events.append(event)
+        return {
+            "run": run,
+            "event_counts": [dict(item) for item in await counts.fetchall()],
+            "latest_events": events,
+        }
+
+    @staticmethod
+    def _monthly_lease(
+        row: Mapping[str, object] | aiosqlite.Row, *, acquired: bool
+    ) -> MonthlyRunLease:
+        values = dict(row)
+        return MonthlyRunLease(
+            run_id=int(str(values["id"])),
+            period_key=str(values["period_key"]),
+            owner_id=str(values["owner_id"]) if values.get("owner_id") else None,
+            fencing_token=int(str(values["fencing_token"])),
+            attempts=int(str(values["attempts"])),
+            max_attempts=int(str(values["max_attempts"])),
+            status=str(values["status"]),
+            acquired=acquired,
+            nhtsa_bulk_status=str(values["nhtsa_bulk_status"]),
+            nhtsa_api_status=str(values["nhtsa_api_status"]),
+            partsouq_status=str(values["partsouq_status"]),
+        )
 
     async def enqueue(
         self,

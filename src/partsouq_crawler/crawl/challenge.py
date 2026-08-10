@@ -12,9 +12,9 @@ class ChallengeDecision:
 CHALLENGE_MARKERS = (
     b"just a moment",
     b"enable javascript and cookies to continue",
-    b"/cdn-cgi/challenge-platform/",
-    b"managed challenge",
-    b"cf-chl-",
+    b"verify you are human",
+    "驗證您是人類".encode(),
+    "正在執行安全驗證".encode(),
 )
 
 

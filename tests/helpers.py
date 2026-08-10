@@ -39,6 +39,7 @@ async def crawl_fake(
     max_retries: int = 0,
     robots_policy: str = "require",
     concurrency: int = 1,
+    retry_challenges: bool = False,
 ) -> tuple[int, dict[str, Any]]:
     repository = await Repository.create(database)
     try:
@@ -52,6 +53,7 @@ async def crawl_fake(
             user_agent="partsouq-test/1.0",
             robots_policy=robots_policy,
             lease_seconds=1,
+            retry_challenges=retry_challenges,
         )
         code = await CrawlerEngine(
             repository=repository,

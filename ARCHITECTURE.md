@@ -12,8 +12,8 @@ seed / robots / sitemap / HTML links
        lease + fencing + resume
                  │
                  ▼
-       HTTP or Brave/Playwright
-       stable UA / low concurrency
+ HTTP / Playwright / isolated NoDriver worker
+ headed Chrome / persistent profile / low concurrency
                  │
                  ▼
  raw response + SHA-256 + headers FIRST
@@ -33,6 +33,8 @@ seed / robots / sitemap / HTML links
 - `crawl.engine`：run lifecycle、queue worker、lease heartbeat、fencing、signal pause、challenge circuit breaker。
 - `crawl.fetcher`：aiohttp 正常 GET、固定 UA、timeout、Retry-After 與 per-host delay。
 - `crawl.browser_fetcher`：標準 Playwright browser transport。使用 fresh context，不讀既有 Brave profile、不搬 cookie、不含 stealth。
+- `crawl.browser_worker_fetcher`：以 line-delimited JSON 控制獨立 Python 3.12 NoDriver worker；crawler core 不直接 import AGPL package。
+- `browser_worker/worker.py`：headed Chrome、持久 profile、target-scoped CDP raw body；只回傳最終 main-frame response，不輸出 cookie jar。
 - `crawl.robots`／`crawl.sitemap`／`crawl.discovery`：robots gate、nested sitemap、gzip sitemap 與 HTML/data/meta/form URL discovery。
 - `crawl.challenge`：集中判斷 403、`cf-mitigated: challenge`、Cloudflare title/body markers。
 - `db.mysql_connection`：aiomysql pool、UTC、READ COMMITTED、schema migration、transaction rollback。
@@ -48,11 +50,31 @@ Challenge 是來源不可用狀態，不是空型錄：
 1. 完整 response 先寫 `response_bodies` 與 `http_responses`。
 2. Queue item 變成 `challenged`。
 3. Run 變成 `blocked`，保存 reason。
-4. 共用熔斷器停止 HTTP、Playwright 或其他正常 driver 取得新 item。
+4. 共用熔斷器停止該次 run 取得新 item。
 5. CLI 回非 0；`strict_complete=false`。
 6. Challenge body 不進 parser，也不會建立 normalized record。
 
-Driver 只可因一般相容性問題切換。已偵測 challenge 後，不允許改用 Selenium、stealth、UA 輪替、代理、CAPTCHA solver 或 `cf_clearance` 搬運繼續嘗試。
+月排程保留同一 profile，最多進行 3 次、間隔 30 分鐘的 bounded retry。每次仍以 challenge circuit breaker 結束；不做人工點擊、付費 solver、proxy、UA 輪替或 `cf_clearance` 搬運。
+
+## Monthly orchestration
+
+```text
+systemd timer (day 1 01:00 Asia/Taipei)
+          │ + hourly recovery checks through day 3
+          ▼
+monthly_sync_runs (unique YYYY-MM lease + fencing)
+          │
+          ├── NHTSA bulk child ─► NHTSA artifact/run tables
+          ├── NHTSA API child  ─► NHTSA artifact/run tables
+          └── PartSouq child   ─► crawl run/queue/raw/normalized tables
+          │
+          └── stdout/stderr ───► monthly_sync_events + journald
+```
+
+- 只有一個 owner 可持有當月 run；heartbeat 延長 15 分鐘 lease，stale owner 不能更新 source 或 log。
+- 子程序收到 SIGTERM 後有 30 秒收尾；超時才 kill。PartSouq queue 與 NHTSA content-addressed artifact 都可在下次 attempt 重用。
+- `completed` source 永不重跑；`failed`／`blocked` source 才續。第 3 次仍不完整時標為 `completed_with_gaps`，保留錯誤與全部事件。
+- Server hard reboot 後由 timer recovery schedule 重啟；相同月份與相同 child run key 確保冪等。
 
 ## Historical archive data flow
 

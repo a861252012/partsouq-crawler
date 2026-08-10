@@ -75,6 +75,38 @@ def test_cli_browser_transport_options() -> None:
     assert args.browser_headless is False
 
 
+def test_config_nodriver_transport_requires_dedicated_runtime(tmp_path: Path) -> None:
+    executable = tmp_path / "chrome"
+    executable.write_text("", encoding="utf-8")
+    config = CrawlerConfig(
+        transport="nodriver",
+        browser_executable=executable,
+        browser_profile_dir=tmp_path / "profile",
+        browser_worker_command="python browser_worker/worker.py",
+    )
+
+    config.validate()
+
+
+def test_config_nodriver_rejects_true_headless(tmp_path: Path) -> None:
+    executable = tmp_path / "chrome"
+    executable.write_text("", encoding="utf-8")
+    config = CrawlerConfig(
+        transport="nodriver",
+        browser_executable=executable,
+        browser_profile_dir=tmp_path / "profile",
+        browser_worker_command="python browser_worker/worker.py",
+        browser_headless=True,
+    )
+
+    try:
+        config.validate()
+    except ValueError as error:
+        assert "Xvfb" in str(error)
+    else:
+        raise AssertionError("true headless nodriver configuration was accepted")
+
+
 def test_cli_database_commands_and_export_service(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

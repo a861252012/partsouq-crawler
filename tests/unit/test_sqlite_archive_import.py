@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import sqlite3
 import zlib
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -459,7 +460,7 @@ def test_corrupt_source_body_is_quarantined_without_target_write(
     source_path = tmp_path / "corrupt.sqlite3"
     _create_source(source_path)
     corrupted = zlib.compress(b"tampered body")
-    with sqlite3.connect(source_path) as connection:
+    with closing(sqlite3.connect(source_path)) as connection:
         connection.execute(
             """
             UPDATE response_bodies
@@ -471,6 +472,7 @@ def test_corrupt_source_body_is_quarantined_without_target_write(
             """,
             (corrupted, len(b"tampered body"), len(corrupted)),
         )
+        connection.commit()
     target = FakeMySQLRepository()
     monkeypatch.setattr(sqlite_archive_import, "IngestService", FakeIngestService)
 

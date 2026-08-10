@@ -87,6 +87,11 @@ class CrawlerConfig:
     transport: str = "http"
     browser_executable: Path | None = None
     browser_headless: bool = False
+    browser_profile_dir: Path | None = None
+    browser_worker_command: str = ""
+    browser_challenge_wait_seconds: float = 60.0
+    browser_restart_pages: int = 500
+    retry_challenges: bool = False
 
     @classmethod
     def from_env(cls, **overrides: object) -> CrawlerConfig:
@@ -101,6 +106,13 @@ class CrawlerConfig:
             "browser_executable": os.getenv("PARTSOUQ_BROWSER_EXECUTABLE") or None,
             "browser_headless": os.getenv("PARTSOUQ_BROWSER_HEADLESS", "0").lower()
             in {"1", "true", "yes"},
+            "browser_profile_dir": os.getenv("PARTSOUQ_BROWSER_PROFILE_DIR") or None,
+            "browser_worker_command": os.getenv("PARTSOUQ_BROWSER_WORKER_COMMAND", ""),
+            "browser_challenge_wait_seconds": float(
+                os.getenv("PARTSOUQ_BROWSER_CHALLENGE_WAIT_SECONDS", "60")
+            ),
+            "browser_restart_pages": int(os.getenv("PARTSOUQ_BROWSER_RESTART_PAGES", "500")),
+            "retry_challenges": False,
         }
         values.update({key: value for key, value in overrides.items() if value is not None})
         config = cls(
@@ -122,6 +134,17 @@ class CrawlerConfig:
                 else None
             ),
             browser_headless=bool(values.get("browser_headless", False)),
+            browser_profile_dir=(
+                Path(str(values["browser_profile_dir"]))
+                if values.get("browser_profile_dir")
+                else None
+            ),
+            browser_worker_command=str(values.get("browser_worker_command", "")),
+            browser_challenge_wait_seconds=float(
+                str(values.get("browser_challenge_wait_seconds", 60))
+            ),
+            browser_restart_pages=int(str(values.get("browser_restart_pages", 500))),
+            retry_challenges=bool(values.get("retry_challenges", False)),
         )
         config.validate()
         return config
@@ -137,10 +160,23 @@ class CrawlerConfig:
             raise ValueError("max-pages and max-depth use 0 for unlimited")
         if self.robots_policy not in {"require", "ignore"}:
             raise ValueError("robots-policy must be require or ignore")
-        if self.transport not in {"http", "browser"}:
-            raise ValueError("transport must be http or browser")
-        if self.transport == "browser" and self.concurrency != 1:
-            raise ValueError("browser transport requires concurrency 1")
+        if self.transport not in {"http", "browser", "nodriver"}:
+            raise ValueError("transport must be http, browser, or nodriver")
+        if self.transport in {"browser", "nodriver"} and self.concurrency != 1:
+            raise ValueError("browser transports require concurrency 1")
+        if self.browser_challenge_wait_seconds < 1:
+            raise ValueError("browser challenge wait must be at least 1 second")
+        if self.browser_restart_pages < 1:
+            raise ValueError("browser restart pages must be at least 1")
+        if self.transport == "nodriver":
+            if self.browser_headless:
+                raise ValueError("nodriver requires a headed browser; use Xvfb on Linux")
+            if self.browser_executable is None:
+                raise ValueError("nodriver requires browser_executable")
+            if self.browser_profile_dir is None:
+                raise ValueError("nodriver requires browser_profile_dir")
+            if not self.browser_worker_command.strip():
+                raise ValueError("nodriver requires browser_worker_command")
 
     def public_dict(self) -> dict[str, object]:
         return {
@@ -158,4 +194,10 @@ class CrawlerConfig:
                 str(self.browser_executable) if self.browser_executable else None
             ),
             "browser_headless": self.browser_headless,
+            "browser_profile_dir": (
+                str(self.browser_profile_dir) if self.browser_profile_dir else None
+            ),
+            "browser_challenge_wait_seconds": self.browser_challenge_wait_seconds,
+            "browser_restart_pages": self.browser_restart_pages,
+            "retry_challenges": self.retry_challenges,
         }

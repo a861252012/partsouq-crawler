@@ -2,6 +2,8 @@
 
 文件日期：2026-08-10（Asia/Taipei）
 
+> 這是 MySQL／archive 階段的歷史驗收快照。PartSouq NoDriver 實測、每月無人值守排程與目前 release gate 請以 [最新驗收報告](../outputs/monthly-autonomous-crawler-report.md) 為準；下方的「live normalized 0」只是當時快照。
+
 ## 1. 結論先講
 
 | 項目 | 實作狀態 | 已查證結果 |

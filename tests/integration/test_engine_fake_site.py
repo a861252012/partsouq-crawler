@@ -126,6 +126,49 @@ def test_cloudflare_challenge_blocks_and_preserves_body(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_explicit_retry_refetches_a_previously_challenged_robots_response(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        requests: Counter[str] = Counter()
+        challenge = b"<title>Just a moment...</title>Enable JavaScript and cookies to continue"
+
+        async def handler(request: web.Request) -> web.Response:
+            requests[request.path] += 1
+            if request.path == "/robots.txt" and requests[request.path] == 1:
+                return web.Response(
+                    body=challenge,
+                    status=403,
+                    headers={"cf-mitigated": "challenge", "server": "cloudflare"},
+                    content_type="text/html",
+                )
+            if request.path == "/robots.txt":
+                return robots_response()
+            return web.Response(text="<html>ok</html>", content_type="text/html")
+
+        database = tmp_path / "robots-challenge-retry.sqlite3"
+        async with fake_site(handler) as base:
+            first_code, first = await crawl_fake(database, f"{base}/", run_key="retry")
+            second_code, second = await crawl_fake(
+                database,
+                f"{base}/",
+                run_key="retry",
+                retry_challenges=True,
+            )
+
+        assert first_code == 2
+        assert first["status"] == "blocked"
+        assert second_code == 0
+        assert second["status"] == "completed"
+        assert requests == Counter({"/robots.txt": 2, "/": 1})
+        repository = await Repository.create(database)
+        rows = await repository.find_responses()
+        assert sum(bool(row["is_cloudflare_challenge"]) for row in rows) == 1
+        await repository.close()
+
+    asyncio.run(scenario())
+
+
 def test_parser_failure_is_terminal_gap(tmp_path: Path) -> None:
     async def scenario() -> None:
         async def handler(request: web.Request) -> web.Response:

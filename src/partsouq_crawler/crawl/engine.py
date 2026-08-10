@@ -21,6 +21,7 @@ from partsouq_crawler.db.repository import LeaseLostError, Repository
 from partsouq_crawler.logging import CrawlLogger
 from partsouq_crawler.models.crawl import FetchResult, QueueItem
 from partsouq_crawler.parsers.base import CatalogParser, ParseError
+from partsouq_crawler.services.archive_queue import redact_sensitive_url
 from partsouq_crawler.services.ingest import IngestService
 
 
@@ -108,10 +109,12 @@ class CrawlerEngine:
         if saved is not None:
             row, body = saved
             if row["is_cloudflare_challenge"]:
-                raise CrawlBlocked(str(row["challenge_reason"] or "cloudflare_challenge"))
-            if int(row["http_status"]) != 200:
-                raise CrawlBlocked("robots_unavailable")
-            return parse_robots(robots_url, body, row["charset"] or "utf-8")
+                if not self.config.retry_challenges:
+                    raise CrawlBlocked(str(row["challenge_reason"] or "cloudflare_challenge"))
+            else:
+                if int(row["http_status"]) != 200:
+                    raise CrawlBlocked("robots_unavailable")
+                return parse_robots(robots_url, body, row["charset"] or "utf-8")
 
         try:
             result = await fetcher.fetch_once(robots_url)
@@ -172,7 +175,7 @@ class CrawlerEngine:
                     "page_lease_lost",
                     run_id=self.run_key,
                     queue_id=item.id,
-                    url=item.requested_url,
+                    url=redact_sensitive_url(item.requested_url),
                     status="lease_lost",
                     attempt=item.attempts,
                 )
@@ -185,7 +188,7 @@ class CrawlerEngine:
                     "page_failed",
                     run_id=self.run_key,
                     queue_id=item.id,
-                    url=item.requested_url,
+                    url=redact_sensitive_url(item.requested_url),
                     status="failed",
                     attempt=item.attempts,
                 )
@@ -265,7 +268,7 @@ class CrawlerEngine:
                 "response_stored",
                 run_id=self.run_key,
                 queue_id=item.id,
-                url=item.requested_url,
+                url=redact_sensitive_url(item.requested_url),
                 status=result.status,
                 attempt=attempt,
                 elapsed_ms=result.elapsed_ms,

@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>NHTSA／PartSouq 每月無人值守爬蟲驗收報告</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg:#07111f; --panel:#0d1b2e; --panel2:#11233b; --line:#28415f;
+      --text:#e9f0f8; --muted:#9eb1c7; --cyan:#42d7d0; --blue:#6da8ff;
+      --green:#4ade80; --amber:#fbbf24; --red:#fb7185; --purple:#c084fc;
+    }
+    * { box-sizing:border-box }
+    body { margin:0; font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:radial-gradient(circle at 15% 0,#142c4a 0,transparent 38%),var(--bg); color:var(--text) }
+    main { width:min(1180px,calc(100% - 32px)); margin:auto; padding:40px 0 80px }
+    h1 { margin:0 0 8px; font-size:clamp(30px,5vw,54px); line-height:1.08; letter-spacing:-.03em }
+    h2 { margin:0 0 18px; font-size:24px }
+    h3 { margin:24px 0 10px; color:#d9e7f7 }
+    p { margin:8px 0 14px } a { color:#8cc7ff }
+    code { color:#b9f7ee; background:#071526; padding:2px 6px; border-radius:5px }
+    pre { overflow:auto; padding:16px; border:1px solid var(--line); border-radius:10px; background:#071526; color:#cfe5fa }
+    .eyebrow { color:var(--cyan); font-weight:700; letter-spacing:.12em; text-transform:uppercase }
+    .lede { max-width:880px; color:#c6d5e5; font-size:18px }
+    .meta { color:var(--muted); font-size:13px }
+    .grid { display:grid; gap:16px }
+    .metrics { grid-template-columns:repeat(4,minmax(0,1fr)); margin:28px 0 }
+    .card,.section { border:1px solid var(--line); background:linear-gradient(145deg,rgba(17,35,59,.96),rgba(10,24,42,.96)); border-radius:16px; box-shadow:0 12px 36px rgba(0,0,0,.18) }
+    .card { padding:18px }.section { padding:26px; margin:18px 0 }
+    .metric-label { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.08em }
+    .metric { font-size:30px; font-weight:800; margin:5px 0 }.metric small { font-size:14px; color:var(--muted) }
+    .good { color:var(--green) }.warn { color:var(--amber) }.bad { color:var(--red) }.info { color:var(--blue) }
+    .callout { border-left:4px solid var(--amber); padding:14px 18px; background:rgba(251,191,36,.08); border-radius:8px }
+    .status-grid { grid-template-columns:repeat(2,minmax(0,1fr)) }
+    .status-row { display:flex; justify-content:space-between; gap:16px; padding:10px 0; border-bottom:1px solid rgba(158,177,199,.16) }
+    .status-row:last-child { border:0 }
+    .badge { display:inline-block; padding:3px 9px; border-radius:999px; font-size:12px; font-weight:700; white-space:nowrap }
+    .pass { color:#b9fbd0; background:rgba(74,222,128,.15) }.conditional { color:#ffe8a3; background:rgba(251,191,36,.16) }.fail { color:#fecdd6; background:rgba(251,113,133,.16) }
+    .flow { grid-template-columns:repeat(7,minmax(110px,1fr)); align-items:center; overflow:auto; padding-bottom:6px }
+    .node { min-height:92px; display:flex; align-items:center; justify-content:center; text-align:center; padding:12px; border:1px solid var(--line); border-radius:12px; background:#0a1a2d }
+    .arrow { text-align:center; color:var(--cyan); font-size:25px }
+    table { width:100%; border-collapse:collapse; font-size:14px }
+    th,td { padding:11px 12px; text-align:left; border-bottom:1px solid rgba(158,177,199,.18); vertical-align:top }
+    th { color:#bcd0e5; background:#0a192b; position:sticky; top:0 }
+    .table-wrap { overflow:auto; border:1px solid var(--line); border-radius:12px }
+    .bar-chart { display:grid; gap:11px }.bar-row { display:grid; grid-template-columns:175px 1fr 100px; gap:12px; align-items:center }
+    .track { height:13px; border-radius:20px; background:#071526; overflow:hidden }.fill { height:100%; border-radius:inherit; background:linear-gradient(90deg,var(--cyan),var(--blue)) }
+    .right { text-align:right; font-variant-numeric:tabular-nums }
+    .test-ring { width:150px; height:150px; border-radius:50%; background:conic-gradient(var(--green) 0 81%,#20344c 81% 100%); display:grid; place-items:center; margin:auto }
+    .test-ring::after { content:"81%\A coverage"; white-space:pre; display:grid; place-items:center; text-align:center; width:108px; height:108px; border-radius:50%; background:var(--panel); font-weight:800; font-size:20px }
+    .tests { grid-template-columns:190px 1fr }
+    .timeline { border-left:2px solid var(--line); margin-left:8px; padding-left:20px }.step { position:relative; margin:0 0 18px }.step::before { content:""; position:absolute; width:10px; height:10px; border-radius:50%; background:var(--cyan); left:-26px; top:8px }
+    ul,ol { padding-left:22px } li { margin:5px 0 }
+    footer { color:var(--muted); text-align:center; margin-top:36px }
+    @media(max-width:900px){.metrics{grid-template-columns:repeat(2,1fr)}.flow{grid-template-columns:1fr}.arrow{transform:rotate(90deg)}.tests,.status-grid{grid-template-columns:1fr}}
+    @media(max-width:540px){main{width:min(100% - 20px,1180px);padding-top:24px}.metrics{grid-template-columns:1fr}.section{padding:18px}.bar-row{grid-template-columns:120px 1fr 78px;font-size:12px}}
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="eyebrow">Autonomous monthly data pipeline</div>
+    <h1>NHTSA／PartSouq<br>無人值守爬蟲驗收</h1>
+    <p class="lede">每月排程、MySQL 排重、lease／heartbeat／fencing、斷點續跑與雙層 log 已完成。PartSouq 在本機 Chrome 成功，但 Linux server 仍需同機 preflight；current 全量尚未完成。</p>
+    <p class="meta">2026-08-10 13:07 Asia/Taipei · 基準 012b4bb + working-tree changes · Python 3.12 · MySQL 8</p>
+  </header>
+
+  <section class="grid metrics" aria-label="關鍵指標">
+    <article class="card"><div class="metric-label">Final test suite</div><div class="metric good">126 <small>passed</small></div><div class="meta">0 failure · 81% coverage</div></article>
+    <article class="card"><div class="metric-label">NHTSA published rows</div><div class="metric info">9,876,638</div><div class="meta">457 current artifacts · 0 rejected</div></article>
+    <article class="card"><div class="metric-label">PartSouq historical fitments</div><div class="metric warn">165,438</div><div class="meta">全部 is_verified=0</div></article>
+    <article class="card"><div class="metric-label">PartSouq live server gate</div><div class="metric bad">未通過</div><div class="meta">macOS 成功；Linux Docker 失敗</div></article>
+  </section>
+
+  <div class="callout"><strong>不能混淆：</strong>165,438 是歷史 fitment，不是 PartSouq current 全量。Live 小型 E2E 已抓 7 個 queue item，完整 universe 尚不可測量。</div>
+
+  <section class="section">
+    <h2>完成度總覽</h2>
+    <div class="grid status-grid">
+      <div>
+        <div class="status-row"><span>每月 1 日 01:00 systemd timer</span><span class="badge pass">完成</span></div>
+        <div class="status-row"><span>同月份排重、lease、fencing</span><span class="badge pass">完成</span></div>
+        <div class="status-row"><span>斷電／hard kill recovery</span><span class="badge pass">完成</span></div>
+        <div class="status-row"><span>DB log + journald</span><span class="badge pass">完成</span></div>
+        <div class="status-row"><span>NHTSA bulk + API</span><span class="badge pass">完成</span></div>
+      </div>
+      <div>
+        <div class="status-row"><span>PartSouq 本機 NoDriver</span><span class="badge pass">HTTP 200</span></div>
+        <div class="status-row"><span>PartSouq Linux Docker</span><span class="badge fail">不合格</span></div>
+        <div class="status-row"><span>PartSouq Linux host</span><span class="badge conditional">待 preflight</span></div>
+        <div class="status-row"><span>PartSouq current 全量</span><span class="badge fail">未完成</span></div>
+        <div class="status-row"><span>外部 production timer</span><span class="badge conditional">尚未安裝</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <h2>每月執行與恢復流程</h2>
+    <div class="grid flow">
+      <div class="node">1 日 01:00<br>systemd timer</div><div class="arrow">→</div>
+      <div class="node">MySQL<br>YYYY-MM lease</div><div class="arrow">→</div>
+      <div class="node">NHTSA bulk<br>scope all</div><div class="arrow">→</div>
+      <div class="node">NHTSA API<br>scope all</div>
+    </div>
+    <div class="grid flow" style="margin-top:14px">
+      <div class="node">PartSouq<br>headed Chrome</div><div class="arrow">→</div>
+      <div class="node">raw-first<br>MySQL queue</div><div class="arrow">→</div>
+      <div class="node">成功：completed<br>失敗：bounded retry</div><div class="arrow">→</div>
+      <div class="node">第 3 次仍失敗<br>completed_with_gaps</div>
+    </div>
+    <p class="meta">1 日 02:00～23:00、2～3 日每小時 recovery check。Active lease 或 terminal run 只做 no-op。</p>
+  </section>
+
+  <section class="section">
+    <h2>Cloudflare／Python browser 實測矩陣</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>方法</th><th>環境</th><th>結果</th><th>決策</th></tr></thead>
+      <tbody>
+        <tr><td>aiohttp</td><td>macOS</td><td class="bad">403 challenge</td><td>不用於 live catalog</td></tr>
+        <tr><td>Playwright + Brave</td><td>headed／persistent</td><td class="bad">60 秒仍 403</td><td>不採用</td></tr>
+        <tr><td>Patchright + Brave</td><td>webdriver false</td><td class="bad">仍 403</td><td>單一指紋 flag 無效</td></tr>
+        <tr><td>NoDriver + Google Chrome</td><td>macOS headed</td><td class="good">403 自動轉 final 200</td><td>目前正式 worker</td></tr>
+        <tr><td>NoDriver true headless</td><td>macOS</td><td class="bad">403</td><td>拒絕 true headless</td></tr>
+        <tr><td>SeleniumBase UC</td><td>macOS headed</td><td class="warn">WebDriver startup timeout</td><td>沒有網站結果</td></tr>
+        <tr><td>Chromium／Chrome + Xvfb</td><td>Linux Docker no-sandbox</td><td class="bad">3 次 403</td><td>不支援 Docker production</td></tr>
+        <tr><td>Google Chrome sandbox</td><td>Linux Docker</td><td class="bad">瀏覽器無法啟動</td><td>改為 Linux host gate</td></tr>
+      </tbody>
+    </table></div>
+    <p>依據：<a href="https://developers.cloudflare.com/cloudflare-challenges/reference/supported-browsers/">Cloudflare supported browsers</a>、<a href="https://github.com/ultrafunkamsterdam/nodriver">NoDriver</a>、<a href="https://seleniumbase.io/help_docs/uc_mode/">SeleniumBase UC</a>。</p>
+  </section>
+
+  <section class="section">
+    <h2>PartSouq live：實際成功證據</h2>
+    <div class="grid status-grid">
+      <div class="card">
+        <div class="metric-label">Production root response</div>
+        <p><strong>HTTP 200 · 141,707 bytes</strong></p>
+        <p class="meta">response id 26,894<br>challenge observed=true<br>final challenge active=false<br>body kind=raw-http<br>provenance rows=2</p>
+      </div>
+      <div class="card">
+        <div class="metric-label">Persistent queue resume</div>
+        <p><strong>done 6 → 7</strong></p>
+        <p class="meta">pending 150 → 149<br>responses 7 → 8<br>challenge=0 · failed=0<br>新 sitemap 6,914,673 bytes</p>
+      </div>
+    </div>
+    <p>Root SHA-256：</p>
+    <pre>7e33735c99629d46a68a7f05d912dd04109cebbd731e6d22508d1ee3b0acde7e</pre>
+    <p>另一路徑 root → Toyota locate → pick → vehicle → unit 全部 200；unit parser 產生 1 vehicle、1 taxonomy、1 diagram、14 parts、469 links。</p>
+  </section>
+
+  <section class="section">
+    <h2>PartSouq MySQL 資料分布</h2>
+    <div class="bar-chart" role="img" aria-label="PartSouq normalized entity row counts relative to fitments">
+      <div class="bar-row"><span>Fitments</span><div class="track"><div class="fill" style="width:100%"></div></div><span class="right">165,438</span></div>
+      <div class="bar-row"><span>Occurrences</span><div class="track"><div class="fill" style="width:96.4%"></div></div><span class="right">159,505</span></div>
+      <div class="bar-row"><span>Taxonomy</span><div class="track"><div class="fill" style="width:45.1%"></div></div><span class="right">74,624</span></div>
+      <div class="bar-row"><span>Part numbers</span><div class="track"><div class="fill" style="width:31.5%"></div></div><span class="right">52,102</span></div>
+      <div class="bar-row"><span>Vehicles</span><div class="track"><div class="fill" style="width:13%"></div></div><span class="right">21,510</span></div>
+      <div class="bar-row"><span>Diagrams</span><div class="track"><div class="fill" style="width:1.65%"></div></div><span class="right">2,724</span></div>
+    </div>
+    <p class="meta">Fitments：verified 0／unverified 165,438。Normalized missing provenance：0。HTTP responses：26,475。</p>
+  </section>
+
+  <section class="section">
+    <h2>Monthly MySQL schema</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Table</th><th>重要欄位</th><th>責任</th></tr></thead>
+      <tbody>
+        <tr><td><code>monthly_sync_runs</code></td><td>period_key unique、owner_id、fencing_token、lease_expires_at、attempts、max_attempts</td><td>每月唯一執行與 failover</td></tr>
+        <tr><td><code>monthly_sync_runs</code></td><td>nhtsa_bulk_status/run_key、nhtsa_api_status/run_key、partsouq_status/run_key</td><td>source 級 checkpoint，只續未完成</td></tr>
+        <tr><td><code>monthly_sync_runs</code></td><td>config_json、summary_json、last_error、timestamps</td><td>設定與最終稽核</td></tr>
+        <tr><td><code>monthly_sync_events</code></td><td>run_id、fencing_token、source_name、level、event_type、message、details_json</td><td>child／orchestrator 結構化 log</td></tr>
+      </tbody>
+    </table></div>
+    <p class="meta">所有時間使用 MySQL server UTC DATETIME(6)。密碼不會寫進 config_json 或 command line。</p>
+  </section>
+
+  <section class="section">
+    <h2>完整測試</h2>
+    <div class="grid tests">
+      <div class="test-ring" aria-label="statement coverage 81 percent"></div>
+      <div>
+        <div class="metric good">126 passed <small>in 10.94s</small></div>
+        <p>Unit 102；Integration 24。MySQL integration 同時啟用 PartSouq 與 NHTSA，warnings 以 error 處理。</p>
+        <ul>
+          <li>Duplicate month、active lease、stale fencing、event query。</li>
+          <li>Partial failure 後只續未完成 source。</li>
+          <li>第 3 次 hard kill／expired lease 自動 final gaps。</li>
+          <li>DB log failure 會終止 child；SIGTERM 30 秒收尾。</li>
+          <li>Robots challenge refetch、catalog challenge requeue、raw-first。</li>
+          <li>真實 PartSouq 200／SHA／parse／provenance／resume。</li>
+        </ul>
+      </div>
+    </div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Gate</th><th>結果</th></tr></thead>
+      <tbody>
+        <tr><td>ruff check／format</td><td class="good">pass · 116 files</td></tr>
+        <tr><td>mypy strict</td><td class="good">80 source files · 0 issues</td></tr>
+        <tr><td>git diff --check／bash -n／compileall</td><td class="good">pass</td></tr>
+        <tr><td>uv lock／offline sdist + wheel</td><td class="good">pass</td></tr>
+        <tr><td>systemd-analyze verify／calendar</td><td class="good">pass</td></tr>
+        <tr><td>Wrapper sandbox refusal</td><td class="good">sandbox=0 正確 exit 1</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <section class="section">
+    <h2>Code review 修正摘要</h2>
+    <div class="timeline">
+      <div class="step"><strong>Challenge false positive</strong><br><span class="meta">合法頁面內嵌 Turnstile 不再被當作整頁 challenge。</span></div>
+      <div class="step"><strong>Main-frame raw capture</strong><br><span class="meta">排除 iframe response，等待初始 403 轉成 final stable 200。</span></div>
+      <div class="step"><strong>Secret-safe logging</strong><br><span class="meta">URL 的 ssd／VIN 預設遮罩；MySQL password 不進 command/config。</span></div>
+      <div class="step"><strong>No dead pipe</strong><br><span class="meta">DB event writer 失敗會立刻結束 child，不等 child 因 stdout backpressure 卡死。</span></div>
+      <div class="step"><strong>Hard-kill terminal state</strong><br><span class="meta">Attempt 用完且 lease inactive 時自動落 completed_with_gaps。</span></div>
+      <div class="step"><strong>Bounded challenge retry</strong><br><span class="meta">同 profile、30 分鐘、最多 3 次；不是高頻 403 brute retry。</span></div>
+    </div>
+  </section>
+
+  <section class="section">
+    <h2>部署與操作</h2>
+    <pre># 初始化獨立 browser worker
+python3.12 -m venv .venv-browser
+.venv-browser/bin/pip install --requirement browser_worker/requirements.txt
+
+# 啟用 timer
+sudo install -m 0644 deploy/systemd/partsouq-monthly-sync.service /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/partsouq-monthly-sync.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now partsouq-monthly-sync.timer
+
+# 查看 DB 與 journal
+partsouq-crawler monthly-status --period 2026-08 --event-limit 200
+journalctl -u partsouq-monthly-sync.service --since '2026-08-01'</pre>
+    <p>正式 host 必須先用相同 Chrome、Xvfb、profile、service user 與 egress IP 跑一頁 probe，驗收 final 200／parsed true。未通過就不能啟用 PartSouq current 完成聲明。</p>
+  </section>
+
+  <section class="section">
+    <h2>注意事項／release blockers</h2>
+    <ol>
+      <li><strong>PartSouq current/live 全量未完成。</strong>目前 sample queue 為 7 done／149 pending；完整母體未知。</li>
+      <li><strong>外部 Linux production timer 未實際安裝。</strong>Production monthly tables 目前 0 rows；自動化證據來自 test MySQL E2E。</li>
+      <li><strong>Linux host preflight 是必要 gate。</strong>Docker 不是 production fallback。</li>
+      <li>NoDriver 0.50.3 是 AGPL-3.0；部署／散布前需完成授權審查。</li>
+      <li>不使用付費 bypass API、CAPTCHA solver、proxy 或 cookie 注入；互動式驗證無法自動解除時會 blocked。</li>
+      <li><code>monthly.env</code> 必須 0600；DB 中斷時以 journald 保留故障證據。</li>
+      <li>Git remote 是 <code>a861252012/partsouq-crawler</code>；禁止 Bibian 帳號、公司 key 與公司 browser session。</li>
+    </ol>
+  </section>
+
+  <section class="section">
+    <h2>最終判定</h2>
+    <div class="status-row"><span>NHTSA 每月無人值守</span><span class="badge pass">可部署</span></div>
+    <div class="status-row"><span>月排重／續跑／log／DB audit</span><span class="badge pass">可部署</span></div>
+    <div class="status-row"><span>PartSouq crawler 程式</span><span class="badge pass">本機實證成功</span></div>
+    <div class="status-row"><span>PartSouq 指定 Linux server</span><span class="badge conditional">待同機 preflight</span></div>
+    <div class="status-row"><span>PartSouq current 全量</span><span class="badge fail">未完成</span></div>
+  </section>
+
+  <footer>完整命令、SQL、schema 欄位與逐項證據請同時參閱 monthly-autonomous-crawler-report.md。</footer>
+</main>
+</body>
+</html>

@@ -7,6 +7,7 @@ import sqlite3
 import tempfile
 import zlib
 from collections.abc import Mapping, Sequence
+from contextlib import closing
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -433,8 +434,8 @@ class SQLiteArchiveImportService:
     def _backup_read_only(source_path: Path, snapshot_path: Path) -> None:
         source_uri = f"{source_path.as_uri()}?mode=ro"
         with (
-            sqlite3.connect(source_uri, uri=True) as source,
-            sqlite3.connect(snapshot_path) as snapshot,
+            closing(sqlite3.connect(source_uri, uri=True)) as source,
+            closing(sqlite3.connect(snapshot_path)) as snapshot,
         ):
             source.backup(snapshot)
 
@@ -455,7 +456,7 @@ class SQLiteArchiveImportService:
 
     @classmethod
     def _schema_version(cls, path: Path) -> int | None:
-        with cls._connect_snapshot(path) as connection:
+        with closing(cls._connect_snapshot(path)) as connection:
             try:
                 row = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()
             except sqlite3.Error:
@@ -466,7 +467,7 @@ class SQLiteArchiveImportService:
 
     @classmethod
     def _table_counts(cls, path: Path) -> dict[str, int]:
-        with cls._connect_snapshot(path) as connection:
+        with closing(cls._connect_snapshot(path)) as connection:
             rows = connection.execute(
                 """
                 SELECT name FROM sqlite_schema
@@ -486,7 +487,7 @@ class SQLiteArchiveImportService:
 
     @classmethod
     def _body_hashes(cls, path: Path) -> set[str]:
-        with cls._connect_snapshot(path) as connection:
+        with closing(cls._connect_snapshot(path)) as connection:
             return {
                 str(row["sha256"])
                 for row in connection.execute(
@@ -506,7 +507,7 @@ class SQLiteArchiveImportService:
         after_capture_id: int,
         batch_size: int,
     ) -> list[dict[str, object]]:
-        with cls._connect_snapshot(path) as connection:
+        with closing(cls._connect_snapshot(path)) as connection:
             rows = connection.execute(
                 """
                 SELECT

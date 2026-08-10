@@ -4,6 +4,7 @@ from typing import Protocol, Self
 
 from partsouq_crawler.config import CrawlerConfig
 from partsouq_crawler.crawl.browser_fetcher import BrowserFetcher
+from partsouq_crawler.crawl.browser_worker_fetcher import BrowserWorkerFetcher
 from partsouq_crawler.crawl.fetcher import Fetcher
 from partsouq_crawler.models.crawl import FetchResult
 
@@ -29,6 +30,22 @@ def create_fetch_transport(
             executable_path=config.browser_executable,
             headless=config.browser_headless,
             user_agent=config.user_agent or None,
+        )
+    if config.transport == "nodriver":
+        if (
+            config.browser_executable is None
+            or config.browser_profile_dir is None
+            or not config.browser_worker_command
+        ):
+            raise ValueError("nodriver transport is incomplete")
+        return BrowserWorkerFetcher(
+            command=config.browser_worker_command,
+            executable_path=config.browser_executable,
+            profile_dir=config.browser_profile_dir,
+            timeout_seconds=config.request_timeout_seconds,
+            challenge_wait_seconds=config.browser_challenge_wait_seconds,
+            delay_seconds=delay,
+            restart_pages=config.browser_restart_pages,
         )
     return Fetcher(
         user_agent=config.user_agent or "partsouq-crawler/0.1",

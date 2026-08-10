@@ -66,3 +66,18 @@ def test_access_denied_detection() -> None:
 
 def test_normal_403_is_not_automatically_cloudflare() -> None:
     assert not detect_challenge(403, {"server": "nginx"}, b"Forbidden").challenged
+
+
+def test_embedded_turnstile_widget_is_not_a_page_challenge() -> None:
+    body = b"""
+        <html>
+          <head><title>Genuine Parts Catalogs | PartSouq</title></head>
+          <body>
+            <form id="login"><input id="cf-chl-widget-login_response" /></form>
+            <script src="/cdn-cgi/challenge-platform/h/g/turnstile/if/ov2/av0/rcv0.js"></script>
+            <a href="/en/catalog/genuine/locate?c=Toyota">Toyota</a>
+          </body>
+        </html>
+    """
+
+    assert not detect_challenge(200, {"server": "cloudflare"}, body).challenged

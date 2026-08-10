@@ -4,16 +4,18 @@
 
 目前已確認的邊界：
 
-- PartSouq live：標準 HTTP 與 headed Brave／Playwright 都會收到 Cloudflare challenge。系統會先保存 raw response，再把 run 標成 `blocked` 並停止；不會把 challenge HTML 當型錄，也不會使用 stealth、CAPTCHA solver、代理或 cookie 搬運。
+- PartSouq live：標準 HTTP、Playwright 與 Patchright 實測仍收到 Cloudflare challenge；headed Google Chrome + NoDriver 在本機 macOS 可無人工操作自動轉成 200，且已抓取、解析、寫入 MySQL。相同程式在 Linux Docker + Xvfb 仍是 403，Docker 開啟 Chrome sandbox 時則無法啟動。因此 server 必須在實際 Linux host 先通過 preflight，不能把本機成功誤寫成任意 server 已保證成功。
 - PartSouq archive：可從 Common Crawl WARC、Wayback CDX 及合法持有的 HTML 取得真實歷史型錄。全部標為 `historical_archive`，fitment 固定是 unverified，不會冒充 current。
 - NHTSA：已實作官方 bulk files、CSSI 與 vPIC allowlist endpoint 的完整 raw artifact、版本、lineage 與 current pointer 流程。
 
-資料表、最新實測數量及未完成範圍請看 [需求與驗收文件](docs/requirements-notes-schema.md)。
+目前的月排程、實測數量、Cloudflare 測試矩陣與未完成範圍請看 [最新驗收報告](outputs/monthly-autonomous-crawler-report.md)。原始規格與較早的 schema 驗收紀錄保留在 [需求與驗收文件](docs/requirements-notes-schema.md)。
 
 ## 安裝
 
 ```bash
 uv sync --extra dev --frozen
+python3.12 -m venv .venv-browser
+.venv-browser/bin/pip install --requirement browser_worker/requirements.txt
 source .venv/bin/activate
 partsouq-crawler --help
 ```
@@ -52,9 +54,9 @@ partsouq-crawler crawl-all \
 
 `0` 代表 unlimited。同一個 `--run-id` 重跑會延續 MySQL persistent queue；完成項目不會重抓，過期 lease 會回收。Queue claim 使用 `FOR UPDATE SKIP LOCKED`，完成寫入帶 worker 與 fencing token，舊 worker 無法覆寫新租約結果。
 
-### 標準 Brave／Playwright transport
+### Browser transports
 
-這條 transport 只處理一般瀏覽器 JavaScript，不隱藏自動化身分。任一 driver 偵測到 challenge 後會啟動共用熔斷器：
+Playwright `browser` transport 只處理一般瀏覽器 JavaScript，仍會暴露自動化特徵；NoDriver 則是獨立外部 worker。任一 driver 偵測到未解除的 challenge 後都會啟動共用熔斷器：
 
 ```bash
 partsouq-crawler crawl-all \
@@ -67,7 +69,42 @@ partsouq-crawler crawl-all \
   --browser-executable '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser'
 ```
 
-Playwright 與 Selenium 是替代 driver，不需要疊加。Selenium 不能讓已出現的 Cloudflare challenge 變成一般內容；`selenium-stealth`、`undetected-chromedriver`、`pyppeteer-stealth` 等套件的目的包含隱藏自動化或規避偵測，因此本專案不安裝、不測試。
+Playwright、Patchright、SeleniumBase UC 與 NoDriver 是替代方案，不應疊在同一個 browser session。本次實測只有 NoDriver + headed Google Chrome 在本機成功取得 200；SeleniumBase 在 WebDriver 啟動階段逾時，沒有取得網站結果。正式路徑使用獨立 Python 3.12 worker、持久 profile、Chrome 自己的 network stack 與 CDP response body；不把 cookie 搬到 aiohttp，也不使用人工 CAPTCHA、付費 bypass API 或 proxy。
+
+```bash
+partsouq-crawler crawl-all \
+  --run-id partsouq-nodriver-live \
+  --seed-url 'https://partsouq.com/en/catalog/genuine' \
+  --max-pages 10 --max-depth 0 --concurrency 1 --delay 5 \
+  --robots-policy require --transport nodriver \
+  --browser-executable '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' \
+  --browser-profile-dir output/partsouq/browser-profile \
+  --browser-worker-command '.venv-browser/bin/python browser_worker/worker.py'
+```
+
+NoDriver 0.50.3 是 AGPL-3.0；部署或散布前必須自行完成授權審查。偵測到尚未解除的 challenge 時，raw body 仍會先入庫，該次 run 立即停止。月排程只會以同一 profile 每 30 分鐘做最多 3 次 bounded retry，不會密集重試 403。
+
+## 每月無人值守排程
+
+正式範本在 `deploy/systemd/`。首次執行時間是台北時間每月 1 日 01:00；1 日 02:00 至 3 日 23:00 每小時做冪等恢復檢查，處理斷電、主機重開或 process hard kill。已完成或仍持有 lease 時會快速 no-op。
+
+```bash
+sudo install -m 0644 deploy/systemd/partsouq-monthly-sync.service /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/partsouq-monthly-sync.timer /etc/systemd/system/
+sudo install -m 0600 deploy/systemd/monthly.env.example /etc/partsouq-crawler/monthly.env
+sudo systemctl daemon-reload
+sudo systemctl enable --now partsouq-monthly-sync.timer
+systemctl list-timers partsouq-monthly-sync.timer
+```
+
+排程依序執行 NHTSA bulk、NHTSA API、PartSouq live。`monthly_sync_runs` 以 `YYYY-MM` 唯一，避免同月重複；lease、heartbeat 與 fencing token 避免雙主。完成的 source 在後續 attempt 會 skip，只續未完成來源。stdout/stderr 同時進 journald 與 `monthly_sync_events`。
+
+```bash
+partsouq-crawler monthly-status --period 2026-08 --event-limit 200
+journalctl -u partsouq-monthly-sync.service --since '2026-08-01'
+```
+
+正式 host 必須使用 headed Chrome + Xvfb、非 root service user、持久 profile、`PARTSOUQ_BROWSER_SANDBOX=1`。排程腳本會拒絕 true headless 與 `--no-sandbox`。在啟用 timer 前，必須在同一台 host 實跑一頁 `probe` 並確認 HTTP 200；Docker 測試路徑已證明不合格，不是 production fallback。
 
 ## PartSouq 歷史 archive
 
