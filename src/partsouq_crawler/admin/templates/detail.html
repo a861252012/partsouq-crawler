@@ -10,10 +10,10 @@
   </div>
   <section>
     <h2>目前有效內容</h2>
-    <pre>{{ detail.record.payload | tojson(indent=2) }}</pre>
+    <div class="table-wrap"><table><tbody>{% for field, value in detail.record.payload.items() %}<tr><th>{{ field_label(field) }}<br><code>{{ field }}</code></th><td>{% if value is mapping or (value is sequence and value is not string) %}<pre>{{ value | tojson(indent=2) }}</pre>{% else %}{{ value if value is not none else '—' }}{% endif %}</td></tr>{% endfor %}</tbody></table></div>
   </section>
   {% if detail.record.source_payload %}
-    <section><h2>不可變來源內容</h2><pre>{{ detail.record.source_payload | tojson(indent=2) }}</pre></section>
+    <section><h2>不可變來源內容</h2><details><summary>展開原始欄位</summary><pre>{{ detail.record.source_payload | tojson(indent=2) }}</pre></details></section>
   {% endif %}
   <section class="actions">
     <h2>狀態操作</h2>

@@ -21,6 +21,7 @@ dependencies = [
     "warcio>=1.7,<2",
     "aiomysql>=0.3,<1",
     "flask>=3.1,<4",
+    "gunicorn>=23,<24",
 ]
 
 [project.optional-dependencies]

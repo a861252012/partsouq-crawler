@@ -17,7 +17,7 @@ from partsouq_crawler.db.protocols import AsyncConnection, DatabaseRow
 _NULL_SAFE_PARAMETER = re.compile(r"\bIS\s+\?", re.IGNORECASE)
 _EXPECTED_MYSQL_WARNING = re.compile(
     r"(?:Duplicate entry .* for key .*|Table .* already exists|"
-    r"Integer display width is deprecated.*)"
+    r"Integer display width is deprecated.*|'VALUES function' is deprecated.*)"
 )
 
 
@@ -175,6 +175,11 @@ async def apply_mysql_schema(connection: MySQLPoolConnection) -> None:
             await connection.execute(statement)
         current_version = 1
 
+    admin_schema_path = Path(__file__).parent.parent / "admin" / "mysql_schema.sql"
+    admin_schema = admin_schema_path.read_text(encoding="utf-8")
+    for statement in _schema_statements(admin_schema):
+        await connection.execute(statement)
+
     migration_dir = Path(__file__).with_name("mysql_migrations")
     for migration_path in sorted(migration_dir.glob("[0-9][0-9][0-9]_*.sql")):
         version = int(migration_path.name.split("_", 1)[0])
@@ -185,7 +190,10 @@ async def apply_mysql_schema(connection: MySQLPoolConnection) -> None:
             try:
                 await connection.execute(statement)
             except OperationalError as error:
-                if error.args[0] != 1061:  # duplicate index after interrupted DDL migration
+                if error.args[0] not in {
+                    1060,  # duplicate column after interrupted or bootstrap-applied migration
+                    1061,  # duplicate index after interrupted DDL migration
+                }:
                     raise
         await connection.execute(
             "INSERT IGNORE INTO schema_migrations(version, applied_at) "

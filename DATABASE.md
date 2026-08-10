@@ -26,6 +26,11 @@ part_numbers 1 ── n compatibility_hints
 part_numbers 1 ── n part_relations
 
 monthly_sync_runs 1 ── n monthly_sync_events
+
+part_numbers 1 ── n part_term_mappings
+vin_decode_requests n ── 0..1 vin_vehicle_mappings n ── 1 vin_decode_responses
+vin_vehicle_mappings 1 ── n vin_part_fitments n ── 1 part_numbers
+reconciliation_cases ──► admin override/audit
 ```
 
 ### State、raw 與 archive
@@ -44,7 +49,7 @@ monthly_sync_runs 1 ── n monthly_sync_events
 | `sqlite_imports` / `sqlite_import_items` | 舊 SQLite snapshot 的唯讀遷移 manifest、cursor、reconciliation 與 quarantine。 |
 | `parse_failures` | parser/type/error/context；raw HTML 不重複存放。 |
 | `robots_snapshots` | robots response、User-Agent 與 body hash 的稽核快照。 |
-| `monthly_sync_runs` | 每月 `YYYY-MM` 唯一 run、owner、lease、fencing、attempt、三個 source 狀態／run key 與 summary。 |
+| `monthly_sync_runs` | 每月 `YYYY-MM` 唯一 run、owner、lease、fencing、attempt、四個 source 狀態／run key 與 summary。 |
 | `monthly_sync_events` | NHTSA／PartSouq child stdout、錯誤、progress 與 orchestrator lifecycle；依 run/source/type 可查。 |
 
 ### Normalized 與 provenance
@@ -60,6 +65,12 @@ monthly_sync_runs 1 ── n monthly_sync_events
 | `fitments` | occurrence 的適用主張、confidence、derivation、verified 狀態。Archive 固定 unverified。 |
 | `compatibility_hints` | `/search/all` 的粗略相容文字，不會建立 verified fitment。 |
 | `part_relations` | 網站明示 replacement／substitution；不做 transitive closure。 |
+| `part_term_mappings` | PartSouq 英文零件名稱投影、站方中文名稱與中文俗稱的對照工作集。中文缺值不會自動杜撰。 |
+| `vin_decode_requests` | 站方輸入 VIN 的持久 queue；attempt、lease、worker 與 fencing 防止重複完成。 |
+| `vin_decode_responses` | NHTSA vPIC batch raw JSON、HTTP status、headers、bytes 與 SHA-256。 |
+| `vin_vehicle_mappings` | VIN → 品牌、型號、系列／車身樣式、年份；可由站方明確連結 PartSouq vehicle。 |
+| `vin_part_fitments` | VIN 完成 PartSouq vehicle 連結後投影的料號適用關係；預設未驗證。 |
+| `reconciliation_cases` | 缺中文名稱、缺 VIN→PartSouq vehicle 連結等對帳待辦與證據。 |
 
 所有可能包含 `TEXT` 或 `NULL` 的 logical identity 都使用 generated `natural_key_sha256` unique key，避免 MySQL 前綴 unique 與 nullable unique 的歧義。原始 URL 保存在 `LONGTEXT`，不會為了 index 截斷；queue 另以完整 URL 的 SHA-256 去重。
 
@@ -117,7 +128,7 @@ docker exec -e MYSQL_PWD="$PARTSOUQ_MYSQL_PASSWORD" \
 
 `db-status` 回報各表筆數、raw/compressed bytes、compression ratio、缺 provenance、orphan 與 foreign key 差異。低權限 MySQL 帳號不能讀取 `INNODB_TABLESPACES`，所以 `database_bytes_kind=mysql_statistics_lower_bound` 明確表示該值是 statistics 與已壓縮 payload 的保守下限，不冒充實體 tablespace 大小。MySQL 已由 InnoDB 強制 FK；health report 另以 explicit orphan query 驗證 normalized polymorphic provenance。
 
-## CRUD overlay 與 audit
+## 站方 CRUD overlay、VIN 與對帳
 
 權威 DDL：`src/partsouq_crawler/admin/mysql_schema.sql`。
 
@@ -132,6 +143,9 @@ source tables (SELECT only for partsouq_admin)
 - Source record 不會 UPDATE／DELETE。`retire` 是可恢復的 overlay tombstone。
 - Update transaction 先 `FOR SHARE` 鎖 source、再 `FOR UPDATE` 鎖 head；`expected_revision` 不符回 409。
 - `partsouq_admin` 只有 source `SELECT`、heads `INSERT/UPDATE`、events `INSERT`；對 source `UPDATE` 會由 MySQL 拒絕。
+- 後台另可對 `vin_decode_requests` 做受限 `INSERT/UPDATE`，不能寫 NHTSA raw response、PartSouq source 或 normalized tables。
+- `part_term_mappings`、`vin_vehicle_mappings`、`vin_part_fitments`、`reconciliation_cases` 也是 source record；站方修改仍只進 overlay/audit。
+- 對帳案件的 `current_json`、`candidate_json`、`evidence_json` 保留機器資料；站方可覆寫狀態、嚴重度、留言、負責人與結案說明。
 
 後台列表先用 keyset query 找當頁 key，再用兩次固定 batch query 取得 source/manual payload；每頁恰好 3 次 SQL。Source prefix search 先走各欄 index 的 `UNION` candidate set，只有小型 overlay 表做 JSON substring search。
 

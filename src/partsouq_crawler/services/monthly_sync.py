@@ -395,15 +395,18 @@ class MonthlySyncService:
         return {
             "nhtsa_bulk": lease.nhtsa_bulk_status,
             "nhtsa_api": lease.nhtsa_api_status,
+            "station": lease.station_status,
             "partsouq": lease.partsouq_status,
         }
 
     @staticmethod
     def _validate_commands(commands: Sequence[MonthlySourceCommand]) -> None:
-        expected = {"nhtsa_bulk", "nhtsa_api", "partsouq"}
+        expected = {"nhtsa_bulk", "nhtsa_api", "station", "partsouq"}
         actual = [command.source_name for command in commands]
         if set(actual) != expected or len(actual) != len(expected):
-            raise ValueError("monthly sync requires exactly nhtsa_bulk, nhtsa_api, partsouq")
+            raise ValueError(
+                "monthly sync requires exactly nhtsa_bulk, nhtsa_api, station, partsouq"
+            )
 
     def _install_signal_handlers(self) -> None:
         loop = asyncio.get_running_loop()

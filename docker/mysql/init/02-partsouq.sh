@@ -22,17 +22,27 @@ mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" partsouq \
     < /opt/partsouq-schema/mysql_schema.sql
 mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" partsouq \
     < /opt/partsouq-schema/admin_mysql_schema.sql
+mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" partsouq \
+    < /opt/partsouq-schema/005_monthly_sync_runs.sql
+mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" partsouq \
+    < /opt/partsouq-schema/006_station_admin.sql
 mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" partsouq_test \
     < /opt/partsouq-schema/mysql_schema.sql
 mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" partsouq_test \
     < /opt/partsouq-schema/admin_mysql_schema.sql
+mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" partsouq_test \
+    < /opt/partsouq-schema/005_monthly_sync_runs.sql
+mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" partsouq_test \
+    < /opt/partsouq-schema/006_station_admin.sql
 
 mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" <<SQL
 GRANT SELECT ON partsouq.* TO 'partsouq_admin'@'%';
 GRANT INSERT, UPDATE ON partsouq.admin_override_heads TO 'partsouq_admin'@'%';
 GRANT INSERT ON partsouq.admin_override_events TO 'partsouq_admin'@'%';
+GRANT INSERT, UPDATE ON partsouq.vin_decode_requests TO 'partsouq_admin'@'%';
 GRANT SELECT ON partsouq_test.* TO 'partsouq_admin'@'%';
 GRANT INSERT, UPDATE ON partsouq_test.admin_override_heads TO 'partsouq_admin'@'%';
 GRANT INSERT ON partsouq_test.admin_override_events TO 'partsouq_admin'@'%';
+GRANT INSERT, UPDATE ON partsouq_test.vin_decode_requests TO 'partsouq_admin'@'%';
 FLUSH PRIVILEGES;
 SQL

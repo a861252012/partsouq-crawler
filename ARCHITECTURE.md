@@ -66,6 +66,7 @@ monthly_sync_runs (unique YYYY-MM lease + fencing)
           │
           ├── NHTSA bulk child ─► NHTSA artifact/run tables
           ├── NHTSA API child  ─► NHTSA artifact/run tables
+          ├── station child    ─► terms/VIN/reconciliation tables
           └── PartSouq child   ─► crawl run/queue/raw/normalized tables
           │
           └── stdout/stderr ───► monthly_sync_events + journald
@@ -115,7 +116,7 @@ SQLite 只是一個舊資料輸入格式：
 6. 對帳 source/target body hash、capture identity、parse count、provenance、orphan 與 FK。
 7. 同一 snapshot 重跑時全部 skip；差異或損壞進 quarantine，不能靜默完成。
 
-## CRUD 後台
+## 站方 CRUD／對帳後台
 
 ```text
 MySQL immutable source tables ───────► effective record view
@@ -136,6 +137,29 @@ raw responses / archive captures     admin_override_heads
 - `expected_revision` + row lock 防止 lost update；衝突回 409。
 - CSRF、Strict session cookie、CSP、no-referrer、nosniff 都由 app 固定設定。
 - Raw response 不 inline render；raw HTML 只能明確下載。
+
+### 站方資料投影
+
+```text
+PartSouq part name_en ──► part_term_mappings ──► 缺中文對帳案件
+
+站方 VIN ──► persistent fenced queue ──► NHTSA vPIC batch
+                                               │
+                                               └─► raw JSON + SHA-256
+                                                        │
+                                                        └─► VIN 車型
+                                                               │ 明確人工連結
+                                                               ▼
+                                                     PartSouq vehicle + fitments
+                                                               │
+                                                               └─► VIN 適用零件
+```
+
+- 不從 NHTSA 推測或列舉不存在的全球 VIN universe；只處理站方確實提供的 17 碼 VIN。
+- vPIC batch 每次最多 50 筆；raw JSON 先寫 MySQL，再完成 request queue。
+- VIN 與 PartSouq vehicle 不做 fuzzy auto-join。缺連結會建立高優先級對帳案件。
+- PartSouq 英文零件名只投影既有證據；中文名／俗稱一律等待站方編輯或正式資料源。
+- 站方修改只寫 overlay 與 append-only audit，保留操作者、原因、before／after 與 revision。
 
 ### No-N+1 contract
 
@@ -170,7 +194,7 @@ official bulk ZIP/CSV or allowlisted API
 ```
 
 - Bulk 優先；API client 只能呼叫程式內明列的 CSSI／vPIC 集合 endpoint。
-- VIN decode、VIN range、任意 URL 都由 policy guard 拒絕。
+- 一般同步的 VIN range、VIN 枚舉與任意 URL 由 policy guard 拒絕。站方 VIN queue 只能呼叫固定 vPIC batch endpoint，並限制格式與 50 筆批次。
 - 完整官方 payload 存 MySQL JSON；raw bytes 另依 SHA-256 保存在 Git ignore 目錄。
 - Artifact/member/source line/parser version 全部可追溯。
 - Quarantined artifact 與 rejected row 保留作稽核，但不會更新 current pointer。

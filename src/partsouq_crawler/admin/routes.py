@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import re
 import secrets
 from collections.abc import Callable
 from typing import Any, cast
@@ -28,9 +29,12 @@ from partsouq_crawler.admin.repository import (
     ENTITY_SPECS,
     AdminDataError,
     AdminRepository,
+    EntitySpec,
     RecordNotFoundError,
     RevisionConflictError,
     entity_spec,
+    field_kind,
+    field_label,
 )
 
 DatabaseFactory = Callable[[AdminConfig, QueryTrace], RequestDatabase]
@@ -42,6 +46,8 @@ bp = Blueprint(
     static_folder="static",
     static_url_path="/admin-static",
 )
+
+PUBLIC_ENDPOINTS = frozenset({"admin.login", "admin.static"})
 
 
 def _config() -> AdminConfig:
@@ -61,7 +67,19 @@ def _csrf_token() -> str:
 
 
 @bp.before_app_request
+def require_login() -> ResponseReturnValue | None:
+    config = _config()
+    if not config.auth_required or request.endpoint in PUBLIC_ENDPOINTS:
+        return None
+    if session.get("admin_authenticated") is True:
+        return None
+    return redirect(url_for("admin.login", next=request.full_path.rstrip("?")))
+
+
+@bp.before_app_request
 def open_database() -> None:
+    if request.endpoint in PUBLIC_ENDPOINTS:
+        return
     trace = QueryTrace()
     factory = cast(DatabaseFactory, current_app.extensions["partsouq_admin_database_factory"])
     g.partsouq_admin_query_trace = trace
@@ -81,6 +99,41 @@ def verify_csrf() -> None:
         or not hmac.compare_digest(supplied, expected)
     ):
         abort(400, description="CSRF 驗證失敗")
+
+
+@bp.route("/login", methods=["GET", "POST"])
+def login() -> ResponseReturnValue:
+    config = _config()
+    if not config.auth_required:
+        return redirect(url_for("admin.dashboard"))
+    if request.method == "POST":
+        username = request.form.get("username", "")
+        password = request.form.get("password", "")
+        if hmac.compare_digest(username.encode(), config.username.encode()) and hmac.compare_digest(
+            password.encode(), config.password.encode()
+        ):
+            session.clear()
+            session["admin_authenticated"] = True
+            session["csrf_token"] = secrets.token_urlsafe(32)
+            destination = request.form.get("next", "")
+            if (
+                not destination.startswith("/")
+                or destination.startswith("//")
+                or "\\" in destination
+            ):
+                destination = url_for("admin.dashboard")
+            return redirect(destination)
+        flash("帳號或密碼錯誤。", "error")
+    return render_template(
+        "login.html",
+        next_path=request.args.get("next", ""),
+    )
+
+
+@bp.post("/logout")
+def logout() -> ResponseReturnValue:
+    session.clear()
+    return redirect(url_for("admin.login"))
 
 
 @bp.teardown_app_request
@@ -110,6 +163,8 @@ def template_context() -> dict[str, Any]:
     return {
         "entity_specs": ENTITY_SPECS,
         "csrf_token": _csrf_token,
+        "field_kind": field_kind,
+        "field_label": field_label,
         "query_trace": getattr(g, "partsouq_admin_query_trace", QueryTrace()),
     }
 
@@ -163,10 +218,11 @@ def entity_create(entity_type: str) -> ResponseReturnValue:
             spec=spec,
             record=None,
             payload_json="{}",
+            edit_payload={},
             actor=_config().default_actor,
             mode="create",
         )
-    payload = _payload_from_form()
+    payload = _payload_from_form(spec)
     identity_key = _repository().create_manual(
         entity_type,
         payload,
@@ -205,6 +261,7 @@ def entity_edit(entity_type: str, identity_key: str) -> str:
         spec=spec,
         record=detail.record,
         payload_json=json.dumps(editable, ensure_ascii=False, indent=2, default=str),
+        edit_payload=editable,
         actor=_config().default_actor,
         mode="update",
     )
@@ -215,7 +272,7 @@ def entity_update(entity_type: str, identity_key: str) -> ResponseReturnValue:
     _repository().update_record(
         entity_type,
         identity_key,
-        _payload_from_form(),
+        _payload_from_form(entity_spec(entity_type)),
         expected_revision=_revision_from_form(),
         actor=request.form.get("actor", ""),
         reason=request.form.get("reason", ""),
@@ -224,6 +281,21 @@ def entity_update(entity_type: str, identity_key: str) -> ResponseReturnValue:
     return redirect(
         url_for("admin.entity_detail", entity_type=entity_type, identity_key=identity_key)
     )
+
+
+@bp.route("/station/vins/request", methods=["GET", "POST"])
+def vin_decode_request() -> ResponseReturnValue:
+    if request.method == "GET":
+        return render_template(
+            "vin_request.html",
+            actor=_config().default_actor,
+        )
+    vin = request.form.get("vin", "").strip().upper()
+    if re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", vin) is None:
+        raise AdminDataError("VIN 必須是 17 碼，且不可包含 I、O、Q")
+    _repository().request_vin_decode(vin, actor=request.form.get("actor", ""))
+    flash("VIN 已加入 NHTSA 解碼佇列；下次 station-sync 或月排程會自動處理。", "success")
+    return redirect(url_for("admin.entity_list", entity_type="vin_vehicle_mappings"))
 
 
 @bp.post("/entities/<entity_type>/<identity_key>/retire")
@@ -256,15 +328,45 @@ def entity_restore(entity_type: str, identity_key: str) -> ResponseReturnValue:
     )
 
 
-def _payload_from_form() -> dict[str, Any]:
-    raw = request.form.get("payload_json", "")
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as error:
-        raise AdminDataError(f"JSON 格式錯誤：{error.msg}") from error
-    if not isinstance(payload, dict):
-        raise AdminDataError("資料內容必須是 JSON object")
-    return cast(dict[str, Any], payload)
+def _payload_from_form(spec: EntitySpec) -> dict[str, Any]:
+    if "payload_json" in request.form:
+        raw = request.form.get("payload_json", "")
+        try:
+            decoded_payload = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise AdminDataError(f"JSON 格式錯誤：{error.msg}") from error
+        if not isinstance(decoded_payload, dict):
+            raise AdminDataError("資料內容必須是 JSON object")
+        return cast(dict[str, Any], decoded_payload)
+
+    typed_payload: dict[str, Any] = {}
+    for field in spec.editable_fields:
+        form_key = f"field__{field}"
+        if form_key not in request.form:
+            continue
+        raw_value = request.form.get(form_key, "").strip()
+        if not raw_value:
+            if request.form.get("form_mode") == "update":
+                typed_payload[field] = None
+            continue
+        kind = field_kind(field)
+        try:
+            if kind == "json":
+                value: Any = json.loads(raw_value)
+            elif kind == "boolean":
+                if raw_value not in {"0", "1"}:
+                    raise ValueError
+                value = raw_value == "1"
+            elif kind == "integer":
+                value = int(raw_value)
+            elif kind == "number":
+                value = float(raw_value)
+            else:
+                value = raw_value
+        except (ValueError, json.JSONDecodeError) as error:
+            raise AdminDataError(f"{field_label(field)}格式錯誤") from error
+        typed_payload[field] = value
+    return typed_payload
 
 
 def _revision_from_form() -> int:

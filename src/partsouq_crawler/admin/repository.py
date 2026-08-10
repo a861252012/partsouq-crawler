@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import date, datetime
@@ -37,6 +38,7 @@ class EntitySpec:
     source_fields: tuple[str, ...]
     editable_fields: tuple[str, ...]
     search_fields: tuple[str, ...]
+    display_fields: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,6 +163,165 @@ _FITMENT_FIELDS = (
     "effective_to",
     "source_url",
 )
+_TAXONOMY_FIELDS = (
+    "vehicle_configuration_id",
+    "parent_id",
+    "depth",
+    "code_raw",
+    "name_raw",
+    "path_raw",
+    "source_url",
+)
+_PART_TERM_FIELDS = (
+    "part_number_id",
+    "name_en_raw",
+    "name_en_normalized",
+    "name_zh_tw",
+    "common_names_zh_tw",
+    "mapping_status",
+    "source_kind",
+    "confidence",
+    "source_url",
+    "observed_at",
+    "created_at",
+    "updated_at",
+)
+_VIN_VEHICLE_FIELDS = (
+    "vin",
+    "make_name",
+    "model_name",
+    "series_name",
+    "body_class",
+    "vehicle_type",
+    "model_year",
+    "manufacturer_name",
+    "partsouq_vehicle_configuration_id",
+    "decode_status",
+    "error_code",
+    "error_text",
+    "source_kind",
+    "response_id",
+    "decoded_at",
+    "created_at",
+    "updated_at",
+)
+_VIN_PART_FIELDS = (
+    "vin_vehicle_mapping_id",
+    "part_number_id",
+    "vehicle_configuration_id",
+    "is_verified",
+    "derivation",
+    "confidence",
+    "source_url",
+    "observed_at",
+    "created_at",
+    "updated_at",
+)
+_RECONCILIATION_FIELDS = (
+    "case_type",
+    "subject_type",
+    "subject_key",
+    "severity",
+    "status",
+    "current_json",
+    "candidate_json",
+    "evidence_json",
+    "comments_json",
+    "assigned_to",
+    "resolution",
+    "source_run_key",
+    "opened_at",
+    "updated_at",
+    "resolved_at",
+)
+
+FIELD_LABELS: dict[str, str] = {
+    "catalog_brand": "型錄品牌",
+    "brand_raw": "原始品牌",
+    "name_raw": "名稱",
+    "model_raw": "型號",
+    "catalog_code": "型錄代碼",
+    "production_from": "生產起始",
+    "production_to": "生產結束",
+    "code_raw": "分類代碼",
+    "path_raw": "分類路徑",
+    "depth": "分類層級",
+    "diagram_code_raw": "分解圖代碼",
+    "diagram_name_raw": "分解圖名稱",
+    "part_brand_raw": "零件品牌",
+    "number_raw": "零件碼",
+    "number_normalized": "標準化零件碼",
+    "name_en_raw": "英文零件名稱",
+    "name_en_normalized": "標準化英文名稱",
+    "name_zh_tw": "中文零件名稱",
+    "common_names_zh_tw": "中文常用俗稱",
+    "mapping_status": "對照狀態",
+    "vin": "車身號碼 VIN",
+    "make_name": "品牌",
+    "model_name": "型號",
+    "series_name": "樣式／系列",
+    "body_class": "車身樣式",
+    "vehicle_type": "車種",
+    "model_year": "年份",
+    "manufacturer_name": "製造商",
+    "partsouq_vehicle_configuration_id": "PartSouq 車型資料 ID",
+    "decode_status": "解碼狀態",
+    "error_code": "NHTSA 錯誤碼",
+    "error_text": "NHTSA 回覆",
+    "part_number_id": "零件資料 ID",
+    "vehicle_configuration_id": "車型資料 ID",
+    "vin_vehicle_mapping_id": "VIN 車型資料 ID",
+    "is_verified": "已人工確認",
+    "derivation": "判定依據",
+    "confidence": "信心分數",
+    "case_type": "案件類型",
+    "subject_type": "資料類型",
+    "subject_key": "資料識別",
+    "severity": "嚴重度",
+    "status": "處理狀態",
+    "current_json": "目前資料",
+    "candidate_json": "候選資料",
+    "evidence_json": "證據",
+    "comments_json": "對帳留言",
+    "assigned_to": "負責人",
+    "resolution": "結案說明",
+    "source_run_key": "爬蟲批次",
+    "source_kind": "資料來源",
+    "source_url": "來源網址",
+    "observed_at": "觀測時間",
+    "decoded_at": "解碼時間",
+    "opened_at": "開案時間",
+    "resolved_at": "結案時間",
+}
+
+JSON_FIELDS = frozenset(
+    {
+        "metadata_json",
+        "row_metadata_json",
+        "common_names_zh_tw",
+        "current_json",
+        "candidate_json",
+        "evidence_json",
+        "comments_json",
+    }
+)
+BOOLEAN_FIELDS = frozenset({"is_assembly_inferred", "is_verified"})
+INTEGER_FIELDS = frozenset(
+    {
+        "vehicle_configuration_id",
+        "taxonomy_node_id",
+        "parent_id",
+        "depth",
+        "part_number_id",
+        "diagram_id",
+        "part_occurrence_id",
+        "vin_vehicle_mapping_id",
+        "model_year",
+        "partsouq_vehicle_configuration_id",
+        "response_id",
+    }
+)
+NUMBER_FIELDS = frozenset({"confidence"})
 
 ENTITY_SPECS: dict[str, EntitySpec] = {
     "vehicle_configurations": EntitySpec(
@@ -171,6 +332,23 @@ ENTITY_SPECS: dict[str, EntitySpec] = {
         source_fields=_VEHICLE_FIELDS,
         editable_fields=_VEHICLE_FIELDS[:-3],
         search_fields=("catalog_brand", "model_raw", "name_raw", "catalog_code"),
+        display_fields=(
+            "catalog_brand",
+            "model_raw",
+            "name_raw",
+            "production_from",
+            "production_to",
+        ),
+    ),
+    "taxonomy_nodes": EntitySpec(
+        key="taxonomy_nodes",
+        title="零件大／中／小分類",
+        table="taxonomy_nodes",
+        record_type="taxonomy_node",
+        source_fields=_TAXONOMY_FIELDS,
+        editable_fields=_TAXONOMY_FIELDS[:-1] + ("name_zh_tw", "common_names_zh_tw"),
+        search_fields=("code_raw", "name_raw", "path_raw"),
+        display_fields=("depth", "code_raw", "name_raw", "name_zh_tw", "path_raw"),
     ),
     "diagrams": EntitySpec(
         key="diagrams",
@@ -180,6 +358,7 @@ ENTITY_SPECS: dict[str, EntitySpec] = {
         source_fields=_DIAGRAM_FIELDS,
         editable_fields=_DIAGRAM_FIELDS[:-1],
         search_fields=("diagram_code_raw", "diagram_name_raw"),
+        display_fields=("diagram_code_raw", "diagram_name_raw", "vehicle_configuration_id"),
     ),
     "part_numbers": EntitySpec(
         key="part_numbers",
@@ -189,6 +368,11 @@ ENTITY_SPECS: dict[str, EntitySpec] = {
         source_fields=_PART_NUMBER_FIELDS,
         editable_fields=_PART_NUMBER_FIELDS[:-3],
         search_fields=("part_brand_raw", "number_normalized", "name_en_raw"),
+        display_fields=(
+            "part_brand_raw",
+            "number_raw",
+            "name_en_raw",
+        ),
     ),
     "part_occurrences": EntitySpec(
         key="part_occurrences",
@@ -198,6 +382,12 @@ ENTITY_SPECS: dict[str, EntitySpec] = {
         source_fields=_OCCURRENCE_FIELDS,
         editable_fields=_OCCURRENCE_FIELDS[:-1],
         search_fields=("callout_raw", "part_range_raw"),
+        display_fields=(
+            "part_number_id",
+            "vehicle_configuration_id",
+            "callout_raw",
+            "quantity_raw",
+        ),
     ),
     "fitments": EntitySpec(
         key="fitments",
@@ -207,8 +397,96 @@ ENTITY_SPECS: dict[str, EntitySpec] = {
         source_fields=_FITMENT_FIELDS,
         editable_fields=_FITMENT_FIELDS[:-1],
         search_fields=("derivation", "effective_from", "effective_to"),
+        display_fields=(
+            "part_number_id",
+            "vehicle_configuration_id",
+            "is_verified",
+            "confidence",
+        ),
+    ),
+    "part_term_mappings": EntitySpec(
+        key="part_term_mappings",
+        title="零件中英／俗稱對照",
+        table="part_term_mappings",
+        record_type="part_term_mapping",
+        source_fields=_PART_TERM_FIELDS,
+        editable_fields=(
+            "part_number_id",
+            "name_en_raw",
+            "name_en_normalized",
+            "name_zh_tw",
+            "common_names_zh_tw",
+            "mapping_status",
+            "source_kind",
+            "confidence",
+        ),
+        search_fields=("name_en_normalized", "name_zh_tw", "mapping_status"),
+        display_fields=(
+            "name_en_raw",
+            "name_zh_tw",
+            "common_names_zh_tw",
+            "mapping_status",
+        ),
+    ),
+    "vin_vehicle_mappings": EntitySpec(
+        key="vin_vehicle_mappings",
+        title="VIN 對應車型",
+        table="vin_vehicle_mappings",
+        record_type="vin_vehicle_mapping",
+        source_fields=_VIN_VEHICLE_FIELDS,
+        editable_fields=_VIN_VEHICLE_FIELDS[:13],
+        search_fields=("vin", "make_name", "model_name", "series_name"),
+        display_fields=(
+            "vin",
+            "make_name",
+            "model_name",
+            "series_name",
+            "model_year",
+            "partsouq_vehicle_configuration_id",
+        ),
+    ),
+    "vin_part_fitments": EntitySpec(
+        key="vin_part_fitments",
+        title="VIN 適用零件",
+        table="vin_part_fitments",
+        record_type="vin_part_fitment",
+        source_fields=_VIN_PART_FIELDS,
+        editable_fields=_VIN_PART_FIELDS[:7],
+        search_fields=("derivation",),
+        display_fields=(
+            "vin_vehicle_mapping_id",
+            "part_number_id",
+            "vehicle_configuration_id",
+            "is_verified",
+        ),
+    ),
+    "reconciliation_cases": EntitySpec(
+        key="reconciliation_cases",
+        title="對帳頻道",
+        table="reconciliation_cases",
+        record_type="reconciliation_case",
+        source_fields=_RECONCILIATION_FIELDS,
+        editable_fields=("severity", "status", "comments_json", "assigned_to", "resolution"),
+        search_fields=("case_type", "subject_type", "subject_key", "status", "assigned_to"),
+        display_fields=("severity", "status", "case_type", "subject_key", "assigned_to"),
     ),
 }
+
+
+def field_label(field: str) -> str:
+    return FIELD_LABELS.get(field, field)
+
+
+def field_kind(field: str) -> str:
+    if field in JSON_FIELDS:
+        return "json"
+    if field in BOOLEAN_FIELDS:
+        return "boolean"
+    if field in INTEGER_FIELDS:
+        return "integer"
+    if field in NUMBER_FIELDS:
+        return "number"
+    return "text"
 
 
 def entity_spec(entity_type: str) -> EntitySpec:
@@ -240,6 +518,23 @@ def _json_default(value: object) -> str:
 class AdminRepository:
     def __init__(self, database: Database) -> None:
         self.database = database
+
+    def request_vin_decode(self, vin: str, *, actor: str) -> None:
+        actor, _ = self._audit_fields(actor, "request NHTSA VIN decode")
+        self.database.execute(
+            "write.request-vin-decode",
+            """
+            INSERT INTO vin_decode_requests(
+                vin, status, requested_by, created_at, updated_at
+            ) VALUES (%s, 'pending', %s, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))
+            ON DUPLICATE KEY UPDATE
+                requested_by = VALUES(requested_by),
+                status = IF(status IN ('completed', 'in_progress'), status, 'pending'),
+                last_error = IF(status IN ('completed', 'in_progress'), last_error, NULL),
+                updated_at = UTC_TIMESTAMP(6)
+            """,
+            (vin, actor),
+        )
 
     def dashboard_counts(self) -> dict[str, dict[str, int]]:
         source_columns = ",\n".join(
@@ -524,22 +819,42 @@ class AdminRepository:
             """,
             (head_id, FANOUT_LIMIT + 1),
         )
-        provenance = self.database.fetch_all(
-            f"detail.provenance.{spec.key}",
-            """
-            SELECT rs.id, rs.parser_name, rs.parser_version, rs.source_url,
-                   rs.extracted_at, rs.response_id, hr.http_status,
-                   hr.body_sha256, hr.fetched_at, ac.archive_source,
-                   ac.collection_name, ac.captured_at
-            FROM record_sources AS rs
-            JOIN http_responses AS hr ON hr.id = rs.response_id
-            LEFT JOIN archive_captures AS ac ON ac.response_id = hr.id
-            WHERE rs.record_type = %s AND rs.record_id = %s
-            ORDER BY rs.id DESC
-            LIMIT %s
-            """,
-            (spec.record_type, source_id or 0, FANOUT_LIMIT + 1),
-        )
+        if spec.key == "vin_vehicle_mappings":
+            provenance = self.database.fetch_all(
+                f"detail.provenance.{spec.key}",
+                """
+                SELECT vr.id, 'nhtsa_vpic' AS parser_name,
+                       'DecodeVINValuesBatch' AS parser_version,
+                       'https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVINValuesBatch/'
+                           AS source_url,
+                       vr.fetched_at AS extracted_at, vr.id AS response_id, vr.http_status,
+                       vr.body_sha256, vr.fetched_at, NULL AS archive_source,
+                       NULL AS collection_name, NULL AS captured_at
+                FROM vin_vehicle_mappings AS vm
+                JOIN vin_decode_responses AS vr ON vr.id = vm.response_id
+                WHERE vm.id = %s
+                ORDER BY vr.id DESC
+                LIMIT %s
+                """,
+                (source_id or 0, FANOUT_LIMIT + 1),
+            )
+        else:
+            provenance = self.database.fetch_all(
+                f"detail.provenance.{spec.key}",
+                """
+                SELECT rs.id, rs.parser_name, rs.parser_version, rs.source_url,
+                       rs.extracted_at, rs.response_id, hr.http_status,
+                       hr.body_sha256, hr.fetched_at, ac.archive_source,
+                       ac.collection_name, ac.captured_at
+                FROM record_sources AS rs
+                JOIN http_responses AS hr ON hr.id = rs.response_id
+                LEFT JOIN archive_captures AS ac ON ac.response_id = hr.id
+                WHERE rs.record_type = %s AND rs.record_id = %s
+                ORDER BY rs.id DESC
+                LIMIT %s
+                """,
+                (spec.record_type, source_id or 0, FANOUT_LIMIT + 1),
+            )
         return RecordDetail(
             record=record,
             events=tuple(self._decode_row(row) for row in events[:FANOUT_LIMIT]),
@@ -841,6 +1156,32 @@ class AdminRepository:
         cleaned = {field: payload[field] for field in spec.editable_fields if field in payload}
         if not cleaned:
             raise AdminDataError("至少要提供一個可編輯欄位")
+        for field, value in cleaned.items():
+            if value is None:
+                continue
+            if field in {"common_names_zh_tw", "comments_json"} and not (
+                isinstance(value, list) and all(isinstance(item, str) for item in value)
+            ):
+                raise AdminDataError(f"{field_label(field)}必須是字串陣列")
+            if field in JSON_FIELDS - {"common_names_zh_tw", "comments_json"} and not isinstance(
+                value, dict
+            ):
+                raise AdminDataError(f"{field_label(field)}必須是 JSON object")
+            if field in BOOLEAN_FIELDS and not isinstance(value, bool):
+                raise AdminDataError(f"{field_label(field)}必須是布林值")
+            if field in INTEGER_FIELDS:
+                if not isinstance(value, int) or isinstance(value, bool):
+                    raise AdminDataError(f"{field_label(field)}必須是整數")
+                minimum = 0 if field == "depth" else 1
+                if value < minimum:
+                    raise AdminDataError(f"{field_label(field)}不可小於 {minimum}")
+                if field == "model_year" and value > 9998:
+                    raise AdminDataError("年份不可大於 9998")
+            if field in NUMBER_FIELDS:
+                if not isinstance(value, int | float) or isinstance(value, bool):
+                    raise AdminDataError(f"{field_label(field)}必須是數值")
+                if not math.isfinite(float(value)) or not 0 <= float(value) <= 1:
+                    raise AdminDataError(f"{field_label(field)}必須介於 0 與 1")
         return cleaned
 
     @staticmethod

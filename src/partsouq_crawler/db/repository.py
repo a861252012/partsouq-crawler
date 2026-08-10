@@ -43,6 +43,16 @@ NORMALIZED_TABLES = (
     ("compatibility_hint", "compatibility_hints"),
     ("part_relation", "part_relations"),
 )
+STATION_TABLES = (
+    "part_term_mappings",
+    "vin_decode_requests",
+    "vin_decode_responses",
+    "vin_vehicle_mappings",
+    "vin_part_fitments",
+    "reconciliation_cases",
+    "admin_override_heads",
+    "admin_override_events",
+)
 
 
 def _paths_resolve_equal(left: Path, right: Path) -> bool:
@@ -302,6 +312,7 @@ class Repository:
         columns = {
             "nhtsa_bulk": ("nhtsa_bulk_status", "nhtsa_bulk_run_key"),
             "nhtsa_api": ("nhtsa_api_status", "nhtsa_api_run_key"),
+            "station": ("station_status", "station_run_key"),
             "partsouq": ("partsouq_status", "partsouq_run_key"),
         }
         if source_name not in columns:
@@ -464,6 +475,7 @@ class Repository:
             acquired=acquired,
             nhtsa_bulk_status=str(values["nhtsa_bulk_status"]),
             nhtsa_api_status=str(values["nhtsa_api_status"]),
+            station_status=str(values["station_status"]),
             partsouq_status=str(values["partsouq_status"]),
         )
 
@@ -1704,6 +1716,8 @@ class Repository:
             *(table for _, table in NORMALIZED_TABLES),
             "parse_failures",
         ]
+        if self.backend_name == "mysql":
+            tables.extend(STATION_TABLES)
         return {table: await self._scalar(f"SELECT COUNT(*) FROM {table}") for table in tables}
 
     async def response_body_hashes(self) -> set[str]:

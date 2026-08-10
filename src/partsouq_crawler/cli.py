@@ -35,6 +35,7 @@ from partsouq_crawler.services.ingest import IngestService
 from partsouq_crawler.services.monthly_sync import MonthlySourceCommand, MonthlySyncService
 from partsouq_crawler.services.reparse import ReparseService
 from partsouq_crawler.services.sqlite_archive_import import SQLiteArchiveImportService
+from partsouq_crawler.services.station_catalog import StationCatalogService
 from partsouq_crawler.services.wayback_import import WaybackImportService
 
 
@@ -178,6 +179,17 @@ def build_parser() -> argparse.ArgumentParser:
     nhtsa_api.add_argument("--run-id", default="nhtsa-official-api")
     nhtsa_api.add_argument("--scope", choices=("all", "vpic", "cssi"), default="all")
 
+    station_sync = subparsers.add_parser(
+        "station-sync",
+        help="Refresh station term mappings, VIN decoding, fitments, and reconciliation",
+    )
+    _partsouq_mysql_arguments(station_sync)
+    station_sync.add_argument("--run-id", required=True)
+    station_sync.add_argument("--nhtsa-user-agent")
+    station_sync.add_argument("--nhtsa-timeout", type=float)
+    station_sync.add_argument("--nhtsa-api-delay", type=float)
+    station_sync.add_argument("--json-log", action="store_true")
+
     nhtsa_status = subparsers.add_parser("nhtsa-status")
     _nhtsa_arguments(nhtsa_status, include_runtime=False)
 
@@ -269,6 +281,19 @@ async def dispatch(args: argparse.Namespace) -> int:
                 await repository.monthly_run_report(period_key, event_limit=args.event_limit)
             )
             return 0
+        if args.command == "station-sync":
+            nhtsa_config = NhtsaConfig.from_env(
+                user_agent=args.nhtsa_user_agent,
+                request_timeout_seconds=args.nhtsa_timeout,
+                api_delay_seconds=args.nhtsa_api_delay,
+            )
+            station_report = await StationCatalogService(
+                repository,
+                nhtsa_config,
+                logger=CrawlLogger(json_mode=args.json_log),
+            ).run(run_key=args.run_id)
+            _print_json(station_report)
+            return 0 if station_report["status"] == "completed" else 2
         if args.command == "probe":
             return await _probe(repository, args)
         if args.command == "crawl-all":
@@ -534,6 +559,23 @@ def _monthly_commands(
                 "--json-log",
             ),
             environment={"PYTHONUNBUFFERED": "1"},
+        ),
+        MonthlySourceCommand(
+            source_name="station",
+            run_key=f"monthly-{period_key}-station",
+            command=(
+                *module,
+                "station-sync",
+                "--run-id",
+                f"monthly-{period_key}-station",
+                "--json-log",
+            ),
+            environment={
+                **child_environment,
+                "NHTSA_USER_AGENT": os.getenv("NHTSA_USER_AGENT", "nhtsa-official-data-sync/0.1"),
+                "NHTSA_REQUEST_TIMEOUT_SECONDS": os.getenv("NHTSA_REQUEST_TIMEOUT_SECONDS", "120"),
+                "NHTSA_API_DELAY_SECONDS": os.getenv("NHTSA_API_DELAY_SECONDS", "0.2"),
+            },
         ),
         MonthlySourceCommand(
             source_name="partsouq",

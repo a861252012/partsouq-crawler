@@ -84,6 +84,7 @@ def _lease(
         acquired=acquired,
         nhtsa_bulk_status="pending",
         nhtsa_api_status="pending",
+        station_status="pending",
         partsouq_status=partsouq_status,
     )
 
@@ -115,6 +116,7 @@ def test_monthly_sync_captures_child_logs_and_completes() -> None:
             commands=(
                 _command("nhtsa_bulk", "bulk"),
                 _command("nhtsa_api", "api"),
+                _command("station", "station"),
                 _command("partsouq", "partsouq"),
             ),
         )
@@ -122,10 +124,11 @@ def test_monthly_sync_captures_child_logs_and_completes() -> None:
         assert report["status"] == "completed"
         assert report["exit_code"] == 0
         assert fake.finished is not None and fake.finished["status"] == "completed"
-        assert sum(event["event_type"] == "progress" for event in fake.events) == 3
+        assert sum(event["event_type"] == "progress" for event in fake.events) == 4
         assert {update[:2] for update in fake.source_updates} >= {
             ("nhtsa_bulk", "completed"),
             ("nhtsa_api", "completed"),
+            ("station", "completed"),
             ("partsouq", "completed"),
         }
 
@@ -151,7 +154,12 @@ def test_monthly_sync_records_spawn_failure_instead_of_losing_the_run() -> None:
         ).run(
             period_key="2099-01",
             scheduled_for="2098-12-31T17:00:00+00:00",
-            commands=(missing, _command("nhtsa_api", "api"), _command("partsouq", "partsouq")),
+            commands=(
+                missing,
+                _command("nhtsa_api", "api"),
+                _command("station", "station"),
+                _command("partsouq", "partsouq"),
+            ),
         )
 
         assert report["status"] == "failed"
@@ -185,6 +193,7 @@ def test_monthly_sync_retries_blocked_source_but_stops_at_attempt_limit() -> Non
             commands=(
                 _command("nhtsa_bulk", "bulk"),
                 _command("nhtsa_api", "api"),
+                _command("station", "station"),
                 _command("partsouq", "partsouq", exit_code=2),
             ),
         )
@@ -220,6 +229,7 @@ def test_monthly_sync_does_not_start_when_period_is_already_owned() -> None:
             commands=(
                 _command("nhtsa_bulk", "bulk"),
                 _command("nhtsa_api", "api"),
+                _command("station", "station"),
                 _command("partsouq", "partsouq"),
             ),
         )
@@ -263,7 +273,12 @@ def test_monthly_sync_terminates_active_child_when_stop_is_requested() -> None:
             service.run(
                 period_key="2099-01",
                 scheduled_for="2098-12-31T17:00:00+00:00",
-                commands=(slow, _command("nhtsa_api", "api"), _command("partsouq", "partsouq")),
+                commands=(
+                    slow,
+                    _command("nhtsa_api", "api"),
+                    _command("station", "station"),
+                    _command("partsouq", "partsouq"),
+                ),
             )
         )
         await asyncio.sleep(0.2)
@@ -306,6 +321,7 @@ def test_monthly_sync_terminates_child_when_log_persistence_fails() -> None:
                 commands=(
                     noisy,
                     _command("nhtsa_api", "api"),
+                    _command("station", "station"),
                     _command("partsouq", "partsouq"),
                 ),
             ),

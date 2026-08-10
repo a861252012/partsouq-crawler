@@ -407,7 +407,7 @@ def test_mysql_monthly_service_runs_children_persists_logs_and_deduplicates() ->
                 ),
                 environment={"PYTHONUNBUFFERED": "1"},
             )
-            for source_name in ("nhtsa_bulk", "nhtsa_api", "partsouq")
+            for source_name in ("nhtsa_bulk", "nhtsa_api", "station", "partsouq")
         )
         try:
             async with repository.transaction() as connection:
@@ -441,7 +441,7 @@ def test_mysql_monthly_service_runs_children_persists_logs_and_deduplicates() ->
             assert second["status"] == "completed"
             assert report["run"]["attempts"] == 1
             assert (
-                sum(event["event_type"] == "e2e_progress" for event in report["latest_events"]) == 3
+                sum(event["event_type"] == "e2e_progress" for event in report["latest_events"]) == 4
             )
         finally:
             async with repository.transaction() as connection:
@@ -477,6 +477,7 @@ def test_mysql_monthly_service_resumes_only_incomplete_sources(tmp_path: Path) -
         commands = (
             MonthlySourceCommand("nhtsa_bulk", "bulk", pass_command, {}),
             MonthlySourceCommand("nhtsa_api", "api", fail_once_command, {}),
+            MonthlySourceCommand("station", "station", pass_command, {}),
             MonthlySourceCommand("partsouq", partsouq_run_key, pass_command, {}),
         )
         try:
@@ -519,7 +520,7 @@ def test_mysql_monthly_service_resumes_only_incomplete_sources(tmp_path: Path) -
                 for event in report["latest_events"]
                 if event["event_type"] == "source_skipped_completed"
             ]
-            assert skipped == ["nhtsa_bulk", "partsouq"]
+            assert skipped == ["nhtsa_bulk", "station", "partsouq"]
         finally:
             async with repository.transaction() as connection:
                 await connection.execute(

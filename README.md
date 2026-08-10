@@ -8,7 +8,7 @@
 - PartSouq archive：可從 Common Crawl WARC、Wayback CDX 及合法持有的 HTML 取得真實歷史型錄。全部標為 `historical_archive`，fitment 固定是 unverified，不會冒充 current。
 - NHTSA：已實作官方 bulk files、CSSI 與 vPIC allowlist endpoint 的完整 raw artifact、版本、lineage 與 current pointer 流程。
 
-目前的月排程、實測數量、Cloudflare 測試矩陣與未完成範圍請看 [最新驗收報告](outputs/monthly-autonomous-crawler-report.md)。原始規格與較早的 schema 驗收紀錄保留在 [需求與驗收文件](docs/requirements-notes-schema.md)。
+目前的資料筆數、站方後台需求矩陣、schema、E2E 結果與未完成範圍請看 [站方後台驗收報告](docs/station-backend-acceptance-2026-08-10.md)。原始規格與較早的 schema 驗收紀錄保留在 [需求與驗收文件](docs/requirements-notes-schema.md)。
 
 ## 安裝
 
@@ -97,7 +97,7 @@ sudo systemctl enable --now partsouq-monthly-sync.timer
 systemctl list-timers partsouq-monthly-sync.timer
 ```
 
-排程依序執行 NHTSA bulk、NHTSA API、PartSouq live。`monthly_sync_runs` 以 `YYYY-MM` 唯一，避免同月重複；lease、heartbeat 與 fencing token 避免雙主。完成的 source 在後續 attempt 會 skip，只續未完成來源。stdout/stderr 同時進 journald 與 `monthly_sync_events`。
+排程依序執行 NHTSA bulk、NHTSA API、站方資料投影／VIN 佇列／對帳、PartSouq live。`monthly_sync_runs` 以 `YYYY-MM` 唯一，避免同月重複；lease、heartbeat 與 fencing token 避免雙主。完成的 source 在後續 attempt 會 skip，只續未完成來源。stdout/stderr 同時進 journald 與 `monthly_sync_events`。
 
 ```bash
 partsouq-crawler monthly-status --period 2026-08 --event-limit 200
@@ -164,7 +164,7 @@ Export 使用 `(record_id, provenance_id)` keyset，每批 1,000 筆，不會一
 
 `strict_complete=true` 必須同時滿足：queue 耗盡、無 failed／challenged／robots skip／parse failure、provenance 完整、foreign key 完整。Archive run 永遠會明確標示不是 current/full。
 
-## 本機 CRUD 後台
+## 站方 CRUD／對帳後台
 
 ```bash
 export PARTSOUQ_ADMIN_SECRET_KEY='replace-with-a-local-random-secret'
@@ -172,23 +172,37 @@ partsouq-admin
 open http://127.0.0.1:8086/
 ```
 
-後台可瀏覽、搜尋、人工建立、更新、停用及恢復車型、diagram、料號、occurrence 與 fitment。Crawler source tables 對 `partsouq_admin` 只有 `SELECT`；所有人工異動寫入 overlay 與 append-only audit event，不會改掉 raw source fact。
+後台可瀏覽、搜尋、人工建立、更新、停用及恢復以下十種資料：車型、零件分類、分解圖、料號、零件出現紀錄、適用關係、零件中英／俗稱、VIN 車型、VIN 適用零件、對帳案件。也可將 17 碼 VIN 加入持久解碼佇列；`station-sync` 或月排程會呼叫 NHTSA vPIC、保存 raw JSON 與 SHA-256，再建立 VIN 車型資料。
 
-後台沒有對外登入機制，因此啟動程式只接受 `127.0.0.1`、`localhost` 或 `::1`；不得改成對外網卡。列表固定 3 條 SQL，detail 固定 4 條 SQL，來源 URL 裡的 `ssd`／VIN 在畫面預設遮蔽。
+Crawler source tables 對 `partsouq_admin` 只有 `SELECT`；所有人工異動寫入 overlay 與 append-only audit event，不會改掉 raw source fact。VIN 對應到 PartSouq 車型必須由站方明確選定 `partsouq_vehicle_configuration_id`，不做模糊字串自動配對；只有完成連結後才投影 VIN 適用零件，且預設仍是未驗證。
+
+只在本機使用時可維持 loopback、無登入。若綁定非 loopback，程式會強制要求帳密、固定 secret 與 secure cookie，否則拒絕啟動。正式環境請放在 HTTPS reverse proxy 後，以 Gunicorn 啟動：
+
+```bash
+export PARTSOUQ_ADMIN_HOST=127.0.0.1
+export PARTSOUQ_ADMIN_USERNAME='replace-me'
+export PARTSOUQ_ADMIN_PASSWORD='replace-me'
+export PARTSOUQ_ADMIN_SECRET_KEY='replace-with-random-secret'
+export PARTSOUQ_ADMIN_SECURE_COOKIE=1
+.venv/bin/gunicorn --bind 127.0.0.1:8086 'partsouq_crawler.admin.app:create_app()'
+```
+
+可直接安裝 `deploy/systemd/partsouq-admin.service` 與 `deploy/systemd/admin.env.example`。列表固定 3 條 SQL，detail 固定 4 條 SQL，來源 URL 裡的 `ssd`／VIN 在畫面預設遮蔽。
 
 列表使用 keyset 分頁與批次載入。Query tag／fingerprint 由測試固定，資料量或 fanout 增加時不會形成 N+1。
 
 ## NHTSA
 
-目前範圍：Safety Ratings、Recalls、Investigations、Complaints、Manufacturer Communications summary/detail、CSSI、vPIC makes/models/manufacturers/variables/variable values。
+固定官方資料範圍：Safety Ratings、Recalls、Investigations、Complaints、Manufacturer Communications summary/detail、CSSI、vPIC makes/models/manufacturers/variables/variable values。另支援對「站方提供的 VIN」呼叫官方 vPIC batch decode；NHTSA 沒有可供列舉全球所有 VIN 的 bulk universe，因此 VIN 必須來自訂單、匯入檔或後台佇列。
 
 ```bash
 partsouq-crawler nhtsa-sync-bulk --scope all --run-id nhtsa-bulk-full
 partsouq-crawler nhtsa-sync-api --scope all --run-id nhtsa-api-full
+partsouq-crawler station-sync --run-id station-2026-08
 partsouq-crawler nhtsa-status
 ```
 
-每個 raw ZIP／CSV／JSON 先以 SHA-256 保存，驗證 ZIP member、CRC、欄位 schema 與逐列解析，再批次寫 MySQL。只有選定 scope 的全部 artifact 都成功且拒絕列為 0，才會原子更新 current pointers。VIN decode、VIN 枚舉與任意 API URL會被 policy 拒絕。
+每個 raw ZIP／CSV／JSON 先以 SHA-256 保存，驗證 ZIP member、CRC、欄位 schema 與逐列解析，再批次寫 MySQL。只有選定 scope 的全部 artifact 都成功且拒絕列為 0，才會原子更新 current pointers。一般 NHTSA sync 仍拒絕任意 API URL 與 VIN 枚舉；VIN decode 只由固定 vPIC batch endpoint、17 碼驗證與最多 50 筆批次的 station queue 執行。
 
 ## 備份與驗收
 

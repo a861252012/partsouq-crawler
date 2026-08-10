@@ -15,4 +15,5 @@ class MonthlyRunLease:
     acquired: bool
     nhtsa_bulk_status: str
     nhtsa_api_status: str
+    station_status: str
     partsouq_status: str

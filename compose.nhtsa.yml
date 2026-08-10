@@ -27,6 +27,8 @@ services:
       - ./docker/mysql/init:/docker-entrypoint-initdb.d:ro
       - ./src/partsouq_crawler/db/mysql_schema.sql:/opt/partsouq-schema/mysql_schema.sql:ro
       - ./src/partsouq_crawler/admin/mysql_schema.sql:/opt/partsouq-schema/admin_mysql_schema.sql:ro
+      - ./src/partsouq_crawler/db/mysql_migrations/005_monthly_sync_runs.sql:/opt/partsouq-schema/005_monthly_sync_runs.sql:ro
+      - ./src/partsouq_crawler/db/mysql_migrations/006_station_admin.sql:/opt/partsouq-schema/006_station_admin.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -unhtsa -p$${MYSQL_PASSWORD} --silent"]
       interval: 5s

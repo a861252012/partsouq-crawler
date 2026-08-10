@@ -18,8 +18,9 @@ CREATE TABLE IF NOT EXISTS admin_override_heads (
     INDEX idx_admin_override_list (entity_type, status, source_record_id, id),
     CONSTRAINT chk_admin_override_entity CHECK (
         entity_type IN (
-            'vehicle_configurations', 'diagrams', 'part_numbers',
-            'part_occurrences', 'fitments'
+            'vehicle_configurations', 'taxonomy_nodes', 'diagrams', 'part_numbers',
+            'part_occurrences', 'fitments', 'part_term_mappings',
+            'vin_vehicle_mappings', 'vin_part_fitments', 'reconciliation_cases'
         )
     ),
     CONSTRAINT chk_admin_override_identity CHECK (

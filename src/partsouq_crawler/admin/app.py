@@ -22,11 +22,13 @@ def create_app(
     database_factory: DatabaseFactory = _default_database_factory,
 ) -> Flask:
     resolved = config or AdminConfig.from_env()
+    resolved.validate_server_mode()
     app = Flask(__name__)
     app.secret_key = resolved.resolved_secret_key()
     app.config.update(
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Strict",
+        SESSION_COOKIE_SECURE=resolved.secure_cookie,
         MAX_CONTENT_LENGTH=1_000_000,
     )
     app.extensions["partsouq_admin_config"] = resolved
@@ -37,8 +39,6 @@ def create_app(
 
 def main() -> None:
     config = AdminConfig.from_env()
-    if config.bind_host not in {"127.0.0.1", "localhost", "::1"}:
-        raise ValueError("PartSouq admin must bind to a loopback address")
     app = create_app(config)
     app.run(host=config.bind_host, port=config.bind_port, debug=False)
 

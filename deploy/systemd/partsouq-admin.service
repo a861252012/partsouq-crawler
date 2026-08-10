@@ -1,0 +1,22 @@
+[Unit]
+Description=PartSouq and NHTSA station administration site
+After=network-online.target mysql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=partsouq-crawler
+Group=partsouq-crawler
+WorkingDirectory=/opt/partsouq-crawler/current
+EnvironmentFile=/etc/partsouq-crawler/admin.env
+ExecStart=/opt/partsouq-crawler/current/.venv/bin/gunicorn --workers 2 --threads 4 --bind 127.0.0.1:8086 --access-logfile - --error-logfile - partsouq_crawler.admin.app:create_app()
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/partsouq-crawler
+
+[Install]
+WantedBy=multi-user.target
