@@ -373,7 +373,7 @@ PARTSOUQ_TEST_MYSQL=1 \
   --cov-report=term:skip-covered
 ```
 
-- Tests：**148 passed in 8.35s**。
+- Tests：**148 passed in 8.48s**；warnings-as-errors coverage run 亦為 148 passed。
 - Failed：0。
 - Skipped：0。
 - Warning：0；warning 以 error 處理。
@@ -433,6 +433,7 @@ Wheel 已確認包含 PartSouq／NHTSA MySQL schema、VIN migration、admin moni
 | Admin CRUD／audit | 通過 | Test MySQL create／update／retire／restore、409、source UPDATE denied |
 | DB integrity | 通過 | Missing provenance 0、orphan 0、FK 0、全部 CHECK TABLE OK |
 | Package install | 通過 | Clean venv 安裝 wheel、CLI 與 resources 可用 |
+| GitHub publication | 通過 | active CLI、SSH identity、remote owner 均為 `a861252012`；commit `a307796` 已推送；private draft PR #1 |
 
 ## 11. 注意事項與交付邊界
 
@@ -444,7 +445,7 @@ Wheel 已確認包含 PartSouq／NHTSA MySQL schema、VIN migration、admin moni
 6. **後台目前是 loopback 工具。** 對外服務前需登入、TLS、reverse proxy、備份與正式 WSGI 設定。
 7. **Linux production 尚未部署。** 本機程式與 systemd 範本已完成，但沒有目標 server 可驗收。
 8. **MySQL 本機密碼不可沿用到正式環境。** `root/root` 只限 `127.0.0.1:3308`。
-9. **GitHub 僅能使用 `a861252012`。** 推送前必須再驗 active account、SSH identity、remote owner 與 remote ref；禁止 Bibian 帳號。
+9. **GitHub 已用 `a861252012` 發布。** active CLI、SSH identity、remote owner 與 remote ref 已逐項驗證；Bibian 帳號為 inactive 且未使用。branch 為 `agent/mysql-admin-archive-import`，commit `a307796`，private draft PR #1。
 
 ## 12. 交付檔案
 
@@ -460,4 +461,4 @@ HTML 由 canonical artifact JSON 產生，包含 NHTSA dataset、PartSouq histor
 2. 接上訂單／CSV／後台 VIN queue，跑 `station-sync` 建 VIN 車型與零件適用投影。
 3. 提供實際 Linux production host 後，安裝 systemd timer，做至少一次跨 1～2 天的月排程驗收。
 4. PartSouq live 維持單一 canary circuit breaker；若沒有合法穩定 current data source，就維持 `blocked`，不可降低驗收標準。
-5. 最終 Git 操作只使用個人帳號 `a861252012`。
+5. 後續 Git 操作持續只使用個人帳號 `a861252012`；目前 private draft PR #1 等待人工 review，未標成 ready。

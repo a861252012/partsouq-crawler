@@ -5,7 +5,7 @@
     "surface": "report",
     "title": "NHTSA／PartSouq 資料管線、站方後台與 E2E 最終報告",
     "description": "截至 2026-08-10 的 production MySQL、NHTSA 官方同步、PartSouq 歷史封存與 live blocker、站方後台、月排程及完整 E2E。",
-    "generatedAt": "2026-08-10T21:24:36+08:00",
+    "generatedAt": "2026-08-10T21:48:44+08:00",
     "cards": [
       {
         "id": "live_records_card",
@@ -283,7 +283,7 @@
         "id": "key_findings",
         "type": "markdown",
         "layout": "full",
-        "body": "## 關鍵結論\n\n1. NHTSA current publication：457 artifacts、12 datasets、9,876,638 source rows、0 rejected。\n2. PartSouq 歷史資料：52,102 part numbers、165,686 fitments；全部 `is_verified=0`。\n3. PartSouq live current：標準 Playwright 403 challenge，verified current fitments 為 0。\n4. 23,709 raw bodies 與 457 NHTSA artifacts 已逐檔／逐 body 驗 SHA、size 與 rows，0 mismatch。\n5. 最終完整 suite：148 passed、82% coverage、0 warning。"
+        "body": "## 關鍵結論\n\n1. NHTSA current publication：457 artifacts、12 datasets、9,876,638 source rows、0 rejected。\n2. PartSouq 歷史資料：52,102 part numbers、165,686 fitments；全部 `is_verified=0`。\n3. PartSouq live current：標準 Playwright 403 challenge，verified current fitments 為 0。\n4. 23,709 raw bodies 與 457 NHTSA artifacts 已逐檔／逐 body 驗 SHA、size 與 rows，0 mismatch。\n5. 最終完整 suite：148 passed、82% coverage、0 warning。\n6. GitHub active CLI、SSH identity 與 remote owner 都是個人帳號 `a861252012`；commit `a307796` 已推送到 private draft PR #1。"
       },
       {
         "id": "partsouq_section",
@@ -331,13 +331,13 @@
         "id": "e2e_section",
         "type": "markdown",
         "layout": "full",
-        "body": "## 完整自測與 E2E\n\n- **148 passed in 8.35s；82% statement coverage；warning-as-error。**\n- NHTSA bulk/API 正式 run completed，503／timeout 依 30／60 秒退避後恢復。\n- NHTSA 457 artifacts：538,835,256 bytes，SHA／size／rows 0 mismatch。\n- PartSouq 23,709 bodies：4,858,808,157 restored bytes，0 mismatch。\n- PartSouq export：165,686 JSONL rows、179,258,045 bytes、0 sensitive URL leak。\n- Admin：root／health／monitoring 與 10 entity lists 全 200；list／monitor 固定 3 queries。\n- DB：missing provenance 0、orphan 0、FK 0、所有實體表 CHECK TABLE OK。\n- Package：offline wheel／sdist、clean venv、CLI 與 resources 通過。"
+        "body": "## 完整自測與 E2E\n\n- **148 passed in 8.48s；82% statement coverage；warning-as-error。**\n- NHTSA bulk/API 正式 run completed，503／timeout 依 30／60 秒退避後恢復。\n- NHTSA 457 artifacts：538,835,256 bytes，SHA／size／rows 0 mismatch。\n- PartSouq 23,709 bodies：4,858,808,157 restored bytes，0 mismatch。\n- PartSouq export：165,686 JSONL rows、179,258,045 bytes、0 sensitive URL leak。\n- Admin：root／health／monitoring 與 10 entity lists 全 200；list／monitor 固定 3 queries。\n- DB：missing provenance 0、orphan 0、FK 0、所有實體表 CHECK TABLE OK。\n- Package：offline wheel／sdist、clean venv、CLI 與 resources 通過。\n- GitHub：active CLI、SSH identity、remote owner 都是 `a861252012`；commit `a307796` 已推送到 private draft PR #1。"
       },
       {
         "id": "limitations_section",
         "type": "markdown",
         "layout": "full",
-        "body": "## 注意事項與限制\n\n- **歷史不等於現行。** 165,686 fitments 全部 historical、`is_verified=0`。\n- **Challenge HTML 不是型錄。** 只保存 raw evidence，不進 parser。\n- **中文與 VIN 是 business input gap。** 目前 51,529 個對帳 case，production VIN queue=0。\n- **Production server 未驗收。** 沒有目標 Linux host，systemd timer 尚未現場安裝。\n- **後台目前是 loopback 工具。** 對外前需 auth、TLS、reverse proxy 與正式 WSGI。\n- **GitHub 只能使用 `a861252012`。** 禁止工作用 Bibian 帳號。"
+        "body": "## 注意事項與限制\n\n- **歷史不等於現行。** 165,686 fitments 全部 historical、`is_verified=0`。\n- **Challenge HTML 不是型錄。** 只保存 raw evidence，不進 parser。\n- **中文與 VIN 是 business input gap。** 目前 51,529 個對帳 case，production VIN queue=0。\n- **Production server 未驗收。** 沒有目標 Linux host，systemd timer 尚未現場安裝。\n- **後台目前是 loopback 工具。** 對外前需 auth、TLS、reverse proxy 與正式 WSGI。\n- **GitHub 已用個人帳號發布。** active CLI、SSH identity、remote owner 都是 `a861252012`；Bibian 為 inactive 且未使用。"
       },
       {
         "id": "methodology_section",
@@ -349,7 +349,7 @@
         "id": "next_steps_section",
         "type": "markdown",
         "layout": "full",
-        "body": "## 下一步\n\n1. 站方用 51,529 個 reconciliation cases 補中文名／俗稱。\n2. 接訂單、CSV 或後台 VIN queue，再跑 station sync。\n3. 提供 Linux production host 後安裝 timer，驗收一次跨 1～2 天的月 run。\n4. PartSouq live 維持單一 canary circuit breaker；沒有合法穩定 current source 時保持 blocked。\n5. 最終 Git 操作只用個人 `a861252012`。"
+        "body": "## 下一步\n\n1. 站方用 51,529 個 reconciliation cases 補中文名／俗稱。\n2. 接訂單、CSV 或後台 VIN queue，再跑 station sync。\n3. 提供 Linux production host 後安裝 timer，驗收一次跨 1～2 天的月 run。\n4. PartSouq live 維持單一 canary circuit breaker；沒有合法穩定 current source 時保持 blocked。\n5. private draft PR #1 等待人工 review；後續 Git 操作仍只用個人 `a861252012`。"
       },
       {
         "id": "further_questions_section",
@@ -361,7 +361,7 @@
   },
   "snapshot": {
     "version": 1,
-    "generatedAt": "2026-08-10T21:24:36+08:00",
+    "generatedAt": "2026-08-10T21:48:44+08:00",
     "status": "partial",
     "datasets": {
       "headline_metrics": [
@@ -704,7 +704,7 @@
         "sql": "SELECT 'vehicle_configurations' AS entity, COUNT(*) AS row_count FROM partsouq.vehicle_configurations UNION ALL SELECT 'taxonomy_nodes', COUNT(*) FROM partsouq.taxonomy_nodes UNION ALL SELECT 'diagrams', COUNT(*) FROM partsouq.diagrams UNION ALL SELECT 'part_numbers', COUNT(*) FROM partsouq.part_numbers UNION ALL SELECT 'part_occurrences', COUNT(*) FROM partsouq.part_occurrences UNION ALL SELECT 'fitments', COUNT(*) FROM partsouq.fitments;",
         "description": "Counts the final PartSouq production MySQL normalized entities after parser v3 replay and integrity checks.",
         "id": "partsouq-entity-counts-20260810",
-        "executed_at": "2026-08-10T21:24:36+08:00",
+        "executed_at": "2026-08-10T21:48:44+08:00",
         "filters": [
           "production schema partsouq",
           "all stored rows"
@@ -732,7 +732,7 @@
         "sql": "SELECT m.archive_source, i.status, COUNT(*) AS row_count FROM partsouq.archive_import_items i JOIN partsouq.archive_import_manifests m ON m.id=i.manifest_id GROUP BY m.archive_source, i.status ORDER BY m.archive_source, i.status;",
         "description": "Groups every persistent archive queue item by source and terminal state.",
         "id": "archive-queue-status-20260810",
-        "executed_at": "2026-08-10T21:24:36+08:00",
+        "executed_at": "2026-08-10T21:48:44+08:00",
         "filters": [
           "Common Crawl and Wayback manifests loaded for this project"
         ],
@@ -755,7 +755,7 @@
         "sql": "SELECT cr.status, cr.blocked_reason, SUM(cq.status='pending') AS pending, SUM(cq.status='challenged') AS challenged, SUM(hr.is_cloudflare_challenge=1) AS challenge_responses FROM partsouq.crawl_runs cr LEFT JOIN partsouq.crawl_queue cq ON cq.run_id=cr.id LEFT JOIN partsouq.http_responses hr ON hr.run_id=cr.id WHERE cr.run_key='partsouq-browser-live-crawl-20260810-mysql' GROUP BY cr.id, cr.status, cr.blocked_reason;",
         "description": "Reads the persisted live browser run, queue, challenge response, completion checks, and normalized count.",
         "id": "partsouq-live-status-20260810",
-        "executed_at": "2026-08-10T21:24:36+08:00",
+        "executed_at": "2026-08-10T21:48:44+08:00",
         "filters": [
           "standard Playwright run key = partsouq-browser-live-crawl-20260810-mysql"
         ],
@@ -779,7 +779,7 @@
         "sql": "SELECT a.dataset_name, SUM(a.source_rows) AS published_source_rows, SUM(a.rejected_rows) AS current_rejected_rows FROM nhtsa.nhtsa_current_artifacts c JOIN nhtsa.nhtsa_source_artifacts a ON a.id=c.artifact_id GROUP BY a.dataset_name ORDER BY a.dataset_name;",
         "description": "Sums source rows and rejected rows for the artifacts currently published by dataset.",
         "id": "nhtsa-current-publication-20260810",
-        "executed_at": "2026-08-10T21:24:36+08:00",
+        "executed_at": "2026-08-10T21:48:44+08:00",
         "filters": [
           "only artifacts referenced by nhtsa_current_artifacts"
         ],
@@ -801,7 +801,7 @@
         "sql": "NHTSA_TEST_MYSQL=1 PARTSOUQ_TEST_MYSQL=1 .venv/bin/python -W error -m pytest --cov=partsouq_crawler --cov-report=term:skip-covered",
         "description": "Runs all unit and integration tests with both MySQL suites enabled, warnings promoted to errors, and statement coverage.",
         "id": "full-test-suite-20260810",
-        "executed_at": "2026-08-10T21:24:36+08:00",
+        "executed_at": "2026-08-10T21:48:44+08:00",
         "filters": [
           "testpaths=tests",
           "PARTSOUQ_TEST_MYSQL=1",
@@ -828,7 +828,7 @@
         "sql": "partsouq-crawler db-status; partsouq-crawler export --include-unverified-fitments; verify all PartSouq body SHA and bytes; verify all NHTSA current artifact SHA, bytes, and rows; CHECK TABLE ... QUICK; curl loopback admin routes; uv build --offline; clean wheel install",
         "description": "Exact production DB, raw-body, artifact, export, HTTP admin, package, and test checks recorded in the Markdown report.",
         "id": "acceptance-evidence-20260810",
-        "executed_at": "2026-08-10T21:24:36+08:00",
+        "executed_at": "2026-08-10T21:48:44+08:00",
         "filters": [
           "production and test MySQL schemas",
           "temporary export and clean wheel environment",

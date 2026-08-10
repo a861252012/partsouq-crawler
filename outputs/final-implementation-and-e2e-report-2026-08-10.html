@@ -37,12 +37,12 @@ html:not([data-portable-source-tooltips-ready]) .portable-chart-summary>.portabl
 </style>
 </head>
 <body>
-<main id="data-analytics-portable-fallback" class="portable-fallback" data-portable-fallback="true" data-portable-surface="report"><header class="portable-page-header"><div class="portable-page-heading"><p class="portable-surface-label">Data Analytics report</p><h1>NHTSA／PartSouq 資料管線、站方後台與 E2E 最終報告</h1><p class="portable-description">截至 2026-08-10 的 production MySQL、NHTSA 官方同步、PartSouq 歷史封存與 live blocker、站方後台、月排程及完整 E2E。</p></div><div class="portable-page-meta"><time datetime="2026-08-10T21:24:36+08:00">Aug 10, 2026, 1:24 PM UTC</time></div></header><section class="portable-notice" aria-labelledby="portable-access-issues"><h2 id="portable-access-issues">Data access issues</h2><ul><li><strong>PartSouq live current catalog:</strong> Standard Playwright received an HTTP 403 Cloudflare challenge. The raw response was preserved, the run was blocked, and verified current fitments remain zero.</li><li><strong>Monthly Linux deployment:</strong> No target Linux production host was provided, so the systemd timer has not been installed or observed across a real one-to-two-day run.</li></ul></section><div class="portable-block-stack">
+<main id="data-analytics-portable-fallback" class="portable-fallback" data-portable-fallback="true" data-portable-surface="report"><header class="portable-page-header"><div class="portable-page-heading"><p class="portable-surface-label">Data Analytics report</p><h1>NHTSA／PartSouq 資料管線、站方後台與 E2E 最終報告</h1><p class="portable-description">截至 2026-08-10 的 production MySQL、NHTSA 官方同步、PartSouq 歷史封存與 live blocker、站方後台、月排程及完整 E2E。</p></div><div class="portable-page-meta"><time datetime="2026-08-10T21:48:44+08:00">Aug 10, 2026, 1:48 PM UTC</time></div></header><section class="portable-notice" aria-labelledby="portable-access-issues"><h2 id="portable-access-issues">Data access issues</h2><ul><li><strong>PartSouq live current catalog:</strong> Standard Playwright received an HTTP 403 Cloudflare challenge. The raw response was preserved, the run was blocked, and verified current fitments remain zero.</li><li><strong>Monthly Linux deployment:</strong> No target Linux production host was provided, so the systemd timer has not been installed or observed across a real one-to-two-day run.</li></ul></section><div class="portable-block-stack">
 <div class="portable-block portable-layout-full" data-artifact-block-id="executive_summary" data-artifact-block-type="markdown" data-layout="full"><section class="portable-markdown"><h2>技術摘要</h2>
 <p><strong>整體判定：部分完成。</strong> NHTSA 官方 bulk/API、PartSouq 歷史 archive、MySQL、站方 CRUD／對帳、月排程、raw/provenance、package 與 E2E 已完成。PartSouq 標準 Playwright live canary 仍收到 Cloudflare 403 challenge，所以 current/live 全量未完成；165,686 是歷史 fitment，不是今日全站。</p></section></div>
 <div class="portable-block portable-layout-full" data-artifact-block-id="headline_metrics_block" data-artifact-block-type="metric-strip" data-layout="full"><section class="portable-metric-grid"><article class="portable-metric-card" data-artifact-id="metric:headline_metrics_block:live_records_card" data-artifact-kind="card" data-card-id="live_records_card"><p class="portable-metric-label">Live current fitments</p><p class="portable-metric-value"><span class="portable-source-tooltip portable-source-value" data-portable-source-host="true" tabindex="0" aria-describedby="portable-source-tooltip-1"><span class="portable-source-value-text">0</span><span class="portable-source-tooltip-content" id="portable-source-tooltip-1" role="tooltip"><span class="portable-source-tooltip-heading" aria-hidden="true">Source for 0</span><strong>Source: PartSouq live run status</strong><span class="portable-source-meta">Tables: partsouq.crawl_runs, partsouq.crawl_queue, partsouq.http_responses, partsouq.record_sources</span></span></span></p><p class="portable-card-description">PartSouq verified current fitments；Cloudflare challenge 後保持 0。</p><div class="portable-inline-source portable-source-summary" data-source-id="partsouq_live_status"><div class="portable-inline-source-content portable-source-summary-content"><span class="portable-source-tooltip-heading" aria-hidden="true">Source for Live current fitments</span><span class="portable-source-context">PartSouq verified current fitments；Cloudflare challenge 後保持 0。</span><strong>Source: PartSouq live run status</strong><span class="portable-source-meta">Tables: partsouq.crawl_runs, partsouq.crawl_queue, partsouq.http_responses, partsouq.record_sources</span><p class="portable-source-description-data">Reads the persisted live browser run, queue, challenge response, completion checks, and normalized count.</p><pre class="portable-source-query-data" aria-hidden="true"><code>SELECT cr.status, cr.blocked_reason, SUM(cq.status=&#39;pending&#39;) AS pending, SUM(cq.status=&#39;challenged&#39;) AS challenged, SUM(hr.is_cloudflare_challenge=1) AS challenge_responses FROM partsouq.crawl_runs cr LEFT JOIN partsouq.crawl_queue cq ON cq.run_id=cr.id LEFT JOIN partsouq.http_responses hr ON hr.run_id=cr.id WHERE cr.run_key=&#39;partsouq-browser-live-crawl-20260810-mysql&#39; GROUP BY cr.id, cr.status, cr.blocked_reason;</code></pre></div></div></article><article class="portable-metric-card" data-artifact-id="metric:headline_metrics_block:historical_fitments_card" data-artifact-kind="card" data-card-id="historical_fitments_card"><p class="portable-metric-label">歷史 fitments</p><p class="portable-metric-value"><span class="portable-source-tooltip portable-source-value" data-portable-source-host="true" tabindex="0" aria-describedby="portable-source-tooltip-2"><span class="portable-source-value-text">165,686</span><span class="portable-source-tooltip-content" id="portable-source-tooltip-2" role="tooltip"><span class="portable-source-tooltip-heading" aria-hidden="true">Source for 165,686</span><strong>Source: PartSouq MySQL counts</strong><span class="portable-source-meta">Tables: partsouq.vehicle_configurations, partsouq.taxonomy_nodes, partsouq.diagrams, partsouq.part_numbers, partsouq.part_occurrences, partsouq.fitments</span></span></span></p><p class="portable-card-description">MySQL 內歷史 fitments；全部 is_verified=0。</p><div class="portable-inline-source portable-source-summary" data-source-id="partsouq_counts"><div class="portable-inline-source-content portable-source-summary-content"><span class="portable-source-tooltip-heading" aria-hidden="true">Source for 歷史 fitments</span><span class="portable-source-context">MySQL 內歷史 fitments；全部 is_verified=0。</span><strong>Source: PartSouq MySQL counts</strong><span class="portable-source-meta">Tables: partsouq.vehicle_configurations, partsouq.taxonomy_nodes, partsouq.diagrams, partsouq.part_numbers, partsouq.part_occurrences, partsouq.fitments</span><p class="portable-source-description-data">Counts the final PartSouq production MySQL normalized entities after parser v3 replay and integrity checks.</p><pre class="portable-source-query-data" aria-hidden="true"><code>SELECT &#39;vehicle_configurations&#39; AS entity, COUNT(*) AS row_count FROM partsouq.vehicle_configurations UNION ALL SELECT &#39;taxonomy_nodes&#39;, COUNT(*) FROM partsouq.taxonomy_nodes UNION ALL SELECT &#39;diagrams&#39;, COUNT(*) FROM partsouq.diagrams UNION ALL SELECT &#39;part_numbers&#39;, COUNT(*) FROM partsouq.part_numbers UNION ALL SELECT &#39;part_occurrences&#39;, COUNT(*) FROM partsouq.part_occurrences UNION ALL SELECT &#39;fitments&#39;, COUNT(*) FROM partsouq.fitments;</code></pre></div></div></article><article class="portable-metric-card" data-artifact-id="metric:headline_metrics_block:nhtsa_rows_card" data-artifact-kind="card" data-card-id="nhtsa_rows_card"><p class="portable-metric-label">NHTSA current rows</p><p class="portable-metric-value"><span class="portable-source-tooltip portable-source-value" data-portable-source-host="true" tabindex="0" aria-describedby="portable-source-tooltip-3"><span class="portable-source-value-text">9,876,638</span><span class="portable-source-tooltip-content" id="portable-source-tooltip-3" role="tooltip"><span class="portable-source-tooltip-heading" aria-hidden="true">Source for 9,876,638</span><strong>Source: NHTSA current artifact publication</strong><span class="portable-source-meta">Tables: nhtsa.nhtsa_current_artifacts, nhtsa.nhtsa_source_artifacts</span></span></span></p><p class="portable-card-description">457 個 NHTSA current artifacts 的 source_rows 合計。</p><div class="portable-inline-source portable-source-summary" data-source-id="nhtsa_published_rows"><div class="portable-inline-source-content portable-source-summary-content"><span class="portable-source-tooltip-heading" aria-hidden="true">Source for NHTSA current rows</span><span class="portable-source-context">457 個 NHTSA current artifacts 的 source_rows 合計。</span><strong>Source: NHTSA current artifact publication</strong><span class="portable-source-meta">Tables: nhtsa.nhtsa_current_artifacts, nhtsa.nhtsa_source_artifacts</span><p class="portable-source-description-data">Sums source rows and rejected rows for the artifacts currently published by dataset.</p><pre class="portable-source-query-data" aria-hidden="true"><code>SELECT a.dataset_name, SUM(a.source_rows) AS published_source_rows, SUM(a.rejected_rows) AS current_rejected_rows FROM nhtsa.nhtsa_current_artifacts c JOIN nhtsa.nhtsa_source_artifacts a ON a.id=c.artifact_id GROUP BY a.dataset_name ORDER BY a.dataset_name;</code></pre></div></div></article><article class="portable-metric-card" data-artifact-id="metric:headline_metrics_block:part_numbers_card" data-artifact-kind="card" data-card-id="part_numbers_card"><p class="portable-metric-label">Part numbers</p><p class="portable-metric-value"><span class="portable-source-tooltip portable-source-value" data-portable-source-host="true" tabindex="0" aria-describedby="portable-source-tooltip-4"><span class="portable-source-value-text">52,102</span><span class="portable-source-tooltip-content" id="portable-source-tooltip-4" role="tooltip"><span class="portable-source-tooltip-heading" aria-hidden="true">Source for 52,102</span><strong>Source: PartSouq MySQL counts</strong><span class="portable-source-meta">Tables: partsouq.vehicle_configurations, partsouq.taxonomy_nodes, partsouq.diagrams, partsouq.part_numbers, partsouq.part_occurrences, partsouq.fitments</span></span></span></p><p class="portable-card-description">PartSouq 歷史資料正規化後的零件號碼筆數。</p><div class="portable-inline-source portable-source-summary" data-source-id="partsouq_counts"><div class="portable-inline-source-content portable-source-summary-content"><span class="portable-source-tooltip-heading" aria-hidden="true">Source for Part numbers</span><span class="portable-source-context">PartSouq 歷史資料正規化後的零件號碼筆數。</span><strong>Source: PartSouq MySQL counts</strong><span class="portable-source-meta">Tables: partsouq.vehicle_configurations, partsouq.taxonomy_nodes, partsouq.diagrams, partsouq.part_numbers, partsouq.part_occurrences, partsouq.fitments</span><p class="portable-source-description-data">Counts the final PartSouq production MySQL normalized entities after parser v3 replay and integrity checks.</p><pre class="portable-source-query-data" aria-hidden="true"><code>SELECT &#39;vehicle_configurations&#39; AS entity, COUNT(*) AS row_count FROM partsouq.vehicle_configurations UNION ALL SELECT &#39;taxonomy_nodes&#39;, COUNT(*) FROM partsouq.taxonomy_nodes UNION ALL SELECT &#39;diagrams&#39;, COUNT(*) FROM partsouq.diagrams UNION ALL SELECT &#39;part_numbers&#39;, COUNT(*) FROM partsouq.part_numbers UNION ALL SELECT &#39;part_occurrences&#39;, COUNT(*) FROM partsouq.part_occurrences UNION ALL SELECT &#39;fitments&#39;, COUNT(*) FROM partsouq.fitments;</code></pre></div></div></article></section></div>
 <div class="portable-block portable-layout-full" data-artifact-block-id="key_findings" data-artifact-block-type="markdown" data-layout="full"><section class="portable-markdown"><h2>關鍵結論</h2>
-<ol><li>NHTSA current publication：457 artifacts、12 datasets、9,876,638 source rows、0 rejected。</li><li>PartSouq 歷史資料：52,102 part numbers、165,686 fitments；全部 <code>is_verified=0</code>。</li><li>PartSouq live current：標準 Playwright 403 challenge，verified current fitments 為 0。</li><li>23,709 raw bodies 與 457 NHTSA artifacts 已逐檔／逐 body 驗 SHA、size 與 rows，0 mismatch。</li><li>最終完整 suite：148 passed、82% coverage、0 warning。</li></ol></section></div>
+<ol><li>NHTSA current publication：457 artifacts、12 datasets、9,876,638 source rows、0 rejected。</li><li>PartSouq 歷史資料：52,102 part numbers、165,686 fitments；全部 <code>is_verified=0</code>。</li><li>PartSouq live current：標準 Playwright 403 challenge，verified current fitments 為 0。</li><li>23,709 raw bodies 與 457 NHTSA artifacts 已逐檔／逐 body 驗 SHA、size 與 rows，0 mismatch。</li><li>最終完整 suite：148 passed、82% coverage、0 warning。</li><li>GitHub active CLI、SSH identity 與 remote owner 都是個人帳號 <code>a861252012</code>；commit <code>a307796</code> 已推送到 private draft PR #1。</li></ol></section></div>
 <div class="portable-block portable-layout-full" data-artifact-block-id="partsouq_section" data-artifact-block-type="markdown" data-layout="full"><section class="portable-markdown"><h2>PartSouq 歷史資料</h2>
 <p>下圖只顯示歷史封存解析後的 normalized entities。完整來源歷程保留在 <code>record_sources</code>；export 每個 normalized record 只選最新版 parser 的一筆 provenance，避免跨版本 replay 造成重複。</p></section></div>
 <div class="portable-block portable-layout-full" data-artifact-block-id="partsouq_entities_block" data-artifact-block-type="chart" data-layout="full"><figure class="portable-content-card portable-chart-summary" data-artifact-id="partsouq_entities_chart" data-artifact-kind="chart" data-chart-id="partsouq_entities_chart" data-portable-visual-title="PartSouq 歷史正規化資料列數" data-portable-source-host="true" tabindex="0" aria-label="PartSouq 歷史正規化資料列數" aria-describedby="portable-source-tooltip-5"><figcaption class="portable-visual-header"><strong>PartSouq 歷史正規化資料列數</strong></figcaption><div class="portable-inline-source" data-source-id="partsouq_counts"><div class="portable-inline-source-content portable-source-tooltip-content" id="portable-source-tooltip-5" role="tooltip"><span class="portable-source-tooltip-heading" aria-hidden="true">Source for PartSouq 歷史正規化資料列數</span><strong>Source: PartSouq MySQL counts</strong><span class="portable-source-meta">Tables: partsouq.vehicle_configurations, partsouq.taxonomy_nodes, partsouq.diagrams, partsouq.part_numbers, partsouq.part_occurrences, partsouq.fitments</span><p class="portable-source-description-data">Counts the final PartSouq production MySQL normalized entities after parser v3 replay and integrity checks.</p><pre class="portable-source-query-data" aria-hidden="true"><code>SELECT &#39;vehicle_configurations&#39; AS entity, COUNT(*) AS row_count FROM partsouq.vehicle_configurations UNION ALL SELECT &#39;taxonomy_nodes&#39;, COUNT(*) FROM partsouq.taxonomy_nodes UNION ALL SELECT &#39;diagrams&#39;, COUNT(*) FROM partsouq.diagrams UNION ALL SELECT &#39;part_numbers&#39;, COUNT(*) FROM partsouq.part_numbers UNION ALL SELECT &#39;part_occurrences&#39;, COUNT(*) FROM partsouq.part_occurrences UNION ALL SELECT &#39;fitments&#39;, COUNT(*) FROM partsouq.fitments;</code></pre></div></div><div class="portable-table-scroll"><table><caption>PartSouq 歷史正規化資料列數 data</caption><thead><tr><th scope="col">資料實體</th><th scope="col" class="portable-table-number">筆數</th><th scope="col">資料範圍</th><th scope="col">驗證狀態</th></tr></thead><tbody><tr><td>Fitments</td><td class="portable-table-number">165,686</td><td>historical archive</td><td>is_verified=0</td></tr><tr><td>Part occurrences</td><td class="portable-table-number">159,753</td><td>historical archive</td><td>provenance complete</td></tr><tr><td>Part numbers</td><td class="portable-table-number">52,102</td><td>historical archive</td><td>provenance complete</td></tr><tr><td>Vehicle configurations</td><td class="portable-table-number">21,510</td><td>historical archive</td><td>provenance complete</td></tr><tr><td>Taxonomy nodes</td><td class="portable-table-number">12,114</td><td>historical archive</td><td>navigation-only nodes removed</td></tr><tr><td>Diagrams</td><td class="portable-table-number">2,724</td><td>historical archive</td><td>provenance complete</td></tr></tbody></table></div></figure></div>
@@ -55,15 +55,15 @@ html:not([data-portable-source-tooltips-ready]) .portable-chart-summary>.portabl
 <div class="portable-block portable-layout-full" data-artifact-block-id="goals_section" data-artifact-block-type="markdown" data-layout="full"><section class="portable-markdown"><h2>需求真值</h2>
 <ul><li><strong>完成：</strong> NHTSA 官方資料、PartSouq MySQL／歷史 archive／normalized、persistent queue、raw/provenance、站方 CRUD／對帳、月排程、package、文件與測試。</li><li><strong>附帶 gap：</strong> Archive 全 terminal，但仍有 96 HTTP error 與 1 parse gap。</li><li><strong>阻擋：</strong> PartSouq live current 全量；標準 Playwright 403 challenge，<code>strict_complete=false</code>。</li><li><strong>待外部條件：</strong> 實際 Linux production host、站方中文詞彙、合法 VIN 輸入。</li></ul></section></div>
 <div class="portable-block portable-layout-full" data-artifact-block-id="e2e_section" data-artifact-block-type="markdown" data-layout="full"><section class="portable-markdown"><h2>完整自測與 E2E</h2>
-<ul><li><strong>148 passed in 8.35s；82% statement coverage；warning-as-error。</strong></li><li>NHTSA bulk/API 正式 run completed，503／timeout 依 30／60 秒退避後恢復。</li><li>NHTSA 457 artifacts：538,835,256 bytes，SHA／size／rows 0 mismatch。</li><li>PartSouq 23,709 bodies：4,858,808,157 restored bytes，0 mismatch。</li><li>PartSouq export：165,686 JSONL rows、179,258,045 bytes、0 sensitive URL leak。</li><li>Admin：root／health／monitoring 與 10 entity lists 全 200；list／monitor 固定 3 queries。</li><li>DB：missing provenance 0、orphan 0、FK 0、所有實體表 CHECK TABLE OK。</li><li>Package：offline wheel／sdist、clean venv、CLI 與 resources 通過。</li></ul></section></div>
+<ul><li><strong>148 passed in 8.48s；82% statement coverage；warning-as-error。</strong></li><li>NHTSA bulk/API 正式 run completed，503／timeout 依 30／60 秒退避後恢復。</li><li>NHTSA 457 artifacts：538,835,256 bytes，SHA／size／rows 0 mismatch。</li><li>PartSouq 23,709 bodies：4,858,808,157 restored bytes，0 mismatch。</li><li>PartSouq export：165,686 JSONL rows、179,258,045 bytes、0 sensitive URL leak。</li><li>Admin：root／health／monitoring 與 10 entity lists 全 200；list／monitor 固定 3 queries。</li><li>DB：missing provenance 0、orphan 0、FK 0、所有實體表 CHECK TABLE OK。</li><li>Package：offline wheel／sdist、clean venv、CLI 與 resources 通過。</li><li>GitHub：active CLI、SSH identity、remote owner 都是 <code>a861252012</code>；commit <code>a307796</code> 已推送到 private draft PR #1。</li></ul></section></div>
 <div class="portable-block portable-layout-full" data-artifact-block-id="limitations_section" data-artifact-block-type="markdown" data-layout="full"><section class="portable-markdown"><h2>注意事項與限制</h2>
-<ul><li><strong>歷史不等於現行。</strong> 165,686 fitments 全部 historical、<code>is_verified=0</code>。</li><li><strong>Challenge HTML 不是型錄。</strong> 只保存 raw evidence，不進 parser。</li><li><strong>中文與 VIN 是 business input gap。</strong> 目前 51,529 個對帳 case，production VIN queue=0。</li><li><strong>Production server 未驗收。</strong> 沒有目標 Linux host，systemd timer 尚未現場安裝。</li><li><strong>後台目前是 loopback 工具。</strong> 對外前需 auth、TLS、reverse proxy 與正式 WSGI。</li><li><strong>GitHub 只能使用 `a861252012`。</strong> 禁止工作用 Bibian 帳號。</li></ul></section></div>
+<ul><li><strong>歷史不等於現行。</strong> 165,686 fitments 全部 historical、<code>is_verified=0</code>。</li><li><strong>Challenge HTML 不是型錄。</strong> 只保存 raw evidence，不進 parser。</li><li><strong>中文與 VIN 是 business input gap。</strong> 目前 51,529 個對帳 case，production VIN queue=0。</li><li><strong>Production server 未驗收。</strong> 沒有目標 Linux host，systemd timer 尚未現場安裝。</li><li><strong>後台目前是 loopback 工具。</strong> 對外前需 auth、TLS、reverse proxy 與正式 WSGI。</li><li><strong>GitHub 已用個人帳號發布。</strong> active CLI、SSH identity、remote owner 都是 <code>a861252012</code>；Bibian 為 inactive 且未使用。</li></ul></section></div>
 <div class="portable-block portable-layout-full" data-artifact-block-id="methodology_section" data-artifact-block-type="markdown" data-layout="full"><section class="portable-markdown"><h2>範圍、定義與方法</h2>
 <p><code>current</code> 只指 current artifact pointer 或現行網站的 verified 資料；<code>historical</code> 指 Common Crawl／Wayback capture；<code>terminal</code> 指 queue 已進 done、challenged、http_error 或 parse_failed。DB count、SHA、provenance 與 current artifact ledger 是高可信證據；archive 全集與 PartSouq live coverage 無法由現有資料證明。</p></section></div>
 <div class="portable-block portable-layout-full" data-artifact-block-id="next_steps_section" data-artifact-block-type="markdown" data-layout="full"><section class="portable-markdown"><h2>下一步</h2>
-<ol><li>站方用 51,529 個 reconciliation cases 補中文名／俗稱。</li><li>接訂單、CSV 或後台 VIN queue，再跑 station sync。</li><li>提供 Linux production host 後安裝 timer，驗收一次跨 1～2 天的月 run。</li><li>PartSouq live 維持單一 canary circuit breaker；沒有合法穩定 current source 時保持 blocked。</li><li>最終 Git 操作只用個人 <code>a861252012</code>。</li></ol></section></div>
+<ol><li>站方用 51,529 個 reconciliation cases 補中文名／俗稱。</li><li>接訂單、CSV 或後台 VIN queue，再跑 station sync。</li><li>提供 Linux production host 後安裝 timer，驗收一次跨 1～2 天的月 run。</li><li>PartSouq live 維持單一 canary circuit breaker；沒有合法穩定 current source 時保持 blocked。</li><li>private draft PR #1 等待人工 review；後續 Git 操作仍只用個人 <code>a861252012</code>。</li></ol></section></div>
 <div class="portable-block portable-layout-full" data-artifact-block-id="further_questions_section" data-artifact-block-type="markdown" data-layout="full"><section class="portable-markdown"><h2>完成判定</h2>
-<p>已完成範圍可交付。唯一未達核心 business outcome 的項目是 PartSouq 現行 live 全量；在 Cloudflare challenge 仍存在且沒有合法穩定 current source 時，不能宣稱完成。</p></section></div></div><section class="portable-sources" aria-labelledby="portable-sources-heading"><h2 id="portable-sources-heading">Sources</h2><ol><li><strong>PartSouq MySQL counts</strong><span class="portable-source-meta">MySQL 8 · 2026-08-10T21:24:36+08:00</span><p>Counts the final PartSouq production MySQL normalized entities after parser v3 replay and integrity checks.</p><details class="portable-source-query" open><summary>SQL query</summary><pre><code>SELECT &#39;vehicle_configurations&#39; AS entity, COUNT(*) AS row_count FROM partsouq.vehicle_configurations UNION ALL SELECT &#39;taxonomy_nodes&#39;, COUNT(*) FROM partsouq.taxonomy_nodes UNION ALL SELECT &#39;diagrams&#39;, COUNT(*) FROM partsouq.diagrams UNION ALL SELECT &#39;part_numbers&#39;, COUNT(*) FROM partsouq.part_numbers UNION ALL SELECT &#39;part_occurrences&#39;, COUNT(*) FROM partsouq.part_occurrences UNION ALL SELECT &#39;fitments&#39;, COUNT(*) FROM partsouq.fitments;</code></pre></details></li><li><strong>PartSouq archive queue status</strong><span class="portable-source-meta">MySQL 8 · 2026-08-10T21:24:36+08:00</span><p>Groups every persistent archive queue item by source and terminal state.</p><details class="portable-source-query" open><summary>SQL query</summary><pre><code>SELECT m.archive_source, i.status, COUNT(*) AS row_count FROM partsouq.archive_import_items i JOIN partsouq.archive_import_manifests m ON m.id=i.manifest_id GROUP BY m.archive_source, i.status ORDER BY m.archive_source, i.status;</code></pre></details></li><li><strong>PartSouq live run status</strong><span class="portable-source-meta">MySQL 8 and crawler CLI · 2026-08-10T21:24:36+08:00</span><p>Reads the persisted live browser run, queue, challenge response, completion checks, and normalized count.</p><details class="portable-source-query" open><summary>SQL query</summary><pre><code>SELECT cr.status, cr.blocked_reason, SUM(cq.status=&#39;pending&#39;) AS pending, SUM(cq.status=&#39;challenged&#39;) AS challenged, SUM(hr.is_cloudflare_challenge=1) AS challenge_responses FROM partsouq.crawl_runs cr LEFT JOIN partsouq.crawl_queue cq ON cq.run_id=cr.id LEFT JOIN partsouq.http_responses hr ON hr.run_id=cr.id WHERE cr.run_key=&#39;partsouq-browser-live-crawl-20260810-mysql&#39; GROUP BY cr.id, cr.status, cr.blocked_reason;</code></pre></details></li><li><strong>NHTSA current artifact publication</strong><span class="portable-source-meta">MySQL 8 · 2026-08-10T21:24:36+08:00</span><p>Sums source rows and rejected rows for the artifacts currently published by dataset.</p><details class="portable-source-query" open><summary>SQL query</summary><pre><code>SELECT a.dataset_name, SUM(a.source_rows) AS published_source_rows, SUM(a.rejected_rows) AS current_rejected_rows FROM nhtsa.nhtsa_current_artifacts c JOIN nhtsa.nhtsa_source_artifacts a ON a.id=c.artifact_id GROUP BY a.dataset_name ORDER BY a.dataset_name;</code></pre></details></li><li><strong>Full pytest and coverage run</strong><span class="portable-source-meta">shell · 2026-08-10T21:24:36+08:00</span><p>Runs all unit and integration tests with both MySQL suites enabled, warnings promoted to errors, and statement coverage.</p><details class="portable-source-query" open><summary>SQL query</summary><pre><code>NHTSA_TEST_MYSQL=1 PARTSOUQ_TEST_MYSQL=1 .venv/bin/python -W error -m pytest --cov=partsouq_crawler --cov-report=term:skip-covered</code></pre></details></li><li><strong>Acceptance E2E evidence ledger</strong><span class="portable-source-meta">verified commands and MySQL audits · 2026-08-10T21:24:36+08:00</span><p>Exact production DB, raw-body, artifact, export, HTTP admin, package, and test checks recorded in the Markdown report.</p><details class="portable-source-query" open><summary>SQL query</summary><pre><code>partsouq-crawler db-status; partsouq-crawler export --include-unverified-fitments; verify all PartSouq body SHA and bytes; verify all NHTSA current artifact SHA, bytes, and rows; CHECK TABLE ... QUICK; curl loopback admin routes; uv build --offline; clean wheel install</code></pre></details></li></ol></section></main>
+<p>已完成範圍可交付。唯一未達核心 business outcome 的項目是 PartSouq 現行 live 全量；在 Cloudflare challenge 仍存在且沒有合法穩定 current source 時，不能宣稱完成。</p></section></div></div><section class="portable-sources" aria-labelledby="portable-sources-heading"><h2 id="portable-sources-heading">Sources</h2><ol><li><strong>PartSouq MySQL counts</strong><span class="portable-source-meta">MySQL 8 · 2026-08-10T21:48:44+08:00</span><p>Counts the final PartSouq production MySQL normalized entities after parser v3 replay and integrity checks.</p><details class="portable-source-query" open><summary>SQL query</summary><pre><code>SELECT &#39;vehicle_configurations&#39; AS entity, COUNT(*) AS row_count FROM partsouq.vehicle_configurations UNION ALL SELECT &#39;taxonomy_nodes&#39;, COUNT(*) FROM partsouq.taxonomy_nodes UNION ALL SELECT &#39;diagrams&#39;, COUNT(*) FROM partsouq.diagrams UNION ALL SELECT &#39;part_numbers&#39;, COUNT(*) FROM partsouq.part_numbers UNION ALL SELECT &#39;part_occurrences&#39;, COUNT(*) FROM partsouq.part_occurrences UNION ALL SELECT &#39;fitments&#39;, COUNT(*) FROM partsouq.fitments;</code></pre></details></li><li><strong>PartSouq archive queue status</strong><span class="portable-source-meta">MySQL 8 · 2026-08-10T21:48:44+08:00</span><p>Groups every persistent archive queue item by source and terminal state.</p><details class="portable-source-query" open><summary>SQL query</summary><pre><code>SELECT m.archive_source, i.status, COUNT(*) AS row_count FROM partsouq.archive_import_items i JOIN partsouq.archive_import_manifests m ON m.id=i.manifest_id GROUP BY m.archive_source, i.status ORDER BY m.archive_source, i.status;</code></pre></details></li><li><strong>PartSouq live run status</strong><span class="portable-source-meta">MySQL 8 and crawler CLI · 2026-08-10T21:48:44+08:00</span><p>Reads the persisted live browser run, queue, challenge response, completion checks, and normalized count.</p><details class="portable-source-query" open><summary>SQL query</summary><pre><code>SELECT cr.status, cr.blocked_reason, SUM(cq.status=&#39;pending&#39;) AS pending, SUM(cq.status=&#39;challenged&#39;) AS challenged, SUM(hr.is_cloudflare_challenge=1) AS challenge_responses FROM partsouq.crawl_runs cr LEFT JOIN partsouq.crawl_queue cq ON cq.run_id=cr.id LEFT JOIN partsouq.http_responses hr ON hr.run_id=cr.id WHERE cr.run_key=&#39;partsouq-browser-live-crawl-20260810-mysql&#39; GROUP BY cr.id, cr.status, cr.blocked_reason;</code></pre></details></li><li><strong>NHTSA current artifact publication</strong><span class="portable-source-meta">MySQL 8 · 2026-08-10T21:48:44+08:00</span><p>Sums source rows and rejected rows for the artifacts currently published by dataset.</p><details class="portable-source-query" open><summary>SQL query</summary><pre><code>SELECT a.dataset_name, SUM(a.source_rows) AS published_source_rows, SUM(a.rejected_rows) AS current_rejected_rows FROM nhtsa.nhtsa_current_artifacts c JOIN nhtsa.nhtsa_source_artifacts a ON a.id=c.artifact_id GROUP BY a.dataset_name ORDER BY a.dataset_name;</code></pre></details></li><li><strong>Full pytest and coverage run</strong><span class="portable-source-meta">shell · 2026-08-10T21:48:44+08:00</span><p>Runs all unit and integration tests with both MySQL suites enabled, warnings promoted to errors, and statement coverage.</p><details class="portable-source-query" open><summary>SQL query</summary><pre><code>NHTSA_TEST_MYSQL=1 PARTSOUQ_TEST_MYSQL=1 .venv/bin/python -W error -m pytest --cov=partsouq_crawler --cov-report=term:skip-covered</code></pre></details></li><li><strong>Acceptance E2E evidence ledger</strong><span class="portable-source-meta">verified commands and MySQL audits · 2026-08-10T21:48:44+08:00</span><p>Exact production DB, raw-body, artifact, export, HTTP admin, package, and test checks recorded in the Markdown report.</p><details class="portable-source-query" open><summary>SQL query</summary><pre><code>partsouq-crawler db-status; partsouq-crawler export --include-unverified-fitments; verify all PartSouq body SHA and bytes; verify all NHTSA current artifact SHA, bytes, and rows; CHECK TABLE ... QUICK; curl loopback admin routes; uv build --offline; clean wheel install</code></pre></details></li></ol></section></main>
 <script data-data-analytics-portable-source-tooltips="true">(() => {
   const RUNTIME_FLAG = "__dataAnalyticsPortableSourceTooltipsInitialized";
   const READY_ATTRIBUTE = "data-portable-source-tooltips-ready";
@@ -404,146 +404,148 @@ html:not([data-portable-source-tooltips-ready]) .portable-chart-summary>.portabl
 })();</script>
 <div id="data-analytics-portable-reader" aria-hidden="true" inert></div>
 <template id="data-analytics-portable-artifact-payload-source" data-compression="gzip-base64">
-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
-sb8uXfI3Y/T/78X/7b249L8BlTV9BRViAAA=
+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
 </template>
 <template id="data-analytics-portable-reader-runtime-source" data-compression="gzip-base64">
 H4sIAAAAAAACE+y9a3fjNrYg+v38CilTV0MeQ4pk15MyyqfiR6e665VyVdLVjseESUhCTIEKCNnl
